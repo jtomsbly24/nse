@@ -1,140 +1,277 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+import pandas_ta as ta
+import plotly.graph_objects as go
 import os
-from datetime import datetime
 
-# ✅ Try to read from Streamlit Secrets first (secure)
-SUPABASE_DB_URL = st.secrets.get(
-    "DATABASE_URL",
-    os.environ.get(
-        "SUPABASE_DB_URL",
-        "postgresql+psycopg2://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres?sslmode=require"
-    ),
+# ----------------------------
+# CONFIGURATION
+# ----------------------------
+# Use environment variable on Streamlit Cloud
+SUPABASE_DB_URL = os.environ.get(
+    "SUPABASE_DB_URL",
+    "postgresql://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres"
 )
+TABLE_NAME = "prices"
+BENCHMARK_SYMBOL = "NIFTY"
 
-# ✅ Create SQLAlchemy engine
-engine = create_engine(SUPABASE_DB_URL, pool_pre_ping=True)
+# Create engine once (cached)
+@st.cache_resource
+def get_engine():
+    return create_engine(SUPABASE_DB_URL, pool_pre_ping=True)
 
-# -------------------------------
-# STREAMLIT PAGE SETUP
-# -------------------------------
-st.set_page_config(page_title="NSE Data Viewer", layout="wide")
-st.title("📊 NSE Stock Data Viewer")
-st.caption("Powered by Supabase + Streamlit Cloud")
-
-# -------------------------------
-# SIDEBAR CONTROLS
-# -------------------------------
-st.sidebar.header("Filters")
-
-# Fetch unique stock symbols
-@st.cache_data(ttl=300)
-def get_symbols():
-    query = "SELECT DISTINCT symbol FROM prices ORDER BY symbol"
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn)
-    return df["symbol"].tolist()
-
-symbols = get_symbols()
-selected_symbol = st.sidebar.selectbox("Choose a stock symbol", symbols)
-
-# Date range selector
-@st.cache_data(ttl=300)
-def get_date_range():
-    query = "SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM prices"
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn)
-    return df.iloc[0]["min_date"], df.iloc[0]["max_date"]
-
-min_date, max_date = get_date_range()
-start_date, end_date = st.sidebar.date_input(
-    "Select Date Range",
-    value=(pd.to_datetime(min_date), pd.to_datetime(max_date)),
-    min_value=pd.to_datetime(min_date),
-    max_value=pd.to_datetime(max_date),
-)
-
-# -------------------------------
-# FETCH DATA
-# -------------------------------
-@st.cache_data(ttl=300)
-def load_data(symbol, start_date, end_date):
-    query = text("""
-        SELECT * FROM prices
-        WHERE symbol = :symbol
-          AND date BETWEEN :start AND :end
-        ORDER BY date
-    """)
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params={"symbol": symbol, "start": start_date, "end": end_date})
+# ----------------------------
+# FUNCTIONS
+# ----------------------------
+@st.cache_data(ttl=600)
+def load_data():
+    """Load data from Supabase PostgreSQL instead of SQLite."""
+    engine = get_engine()
+    query = f"SELECT symbol, date, open, high, low, close, volume FROM {TABLE_NAME};"
+    df = pd.read_sql(query, engine, parse_dates=["date"])
     return df
 
-if selected_symbol:
-    df = load_data(selected_symbol, start_date, end_date)
 
-    if not df.empty:
-        st.subheader(f"{selected_symbol} – Price History")
-        st.line_chart(df.set_index("date")[["close"]])
+def compute_indicators(df, sma_periods, ema_periods, vol_sma_period,
+                       ratio_type, ratio_ma1, ratio_ma2,
+                       enable_rsi, rsi_period, enable_adx, adx_period):
+    df = df.sort_values(["symbol", "date"])
+    results = []
 
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.warning("No data available for this date range.")
+    for sym, g in df.groupby("symbol", group_keys=False):
+        g = g.copy()
+        all_sma_periods = list(set(sma_periods + ([ratio_ma1, ratio_ma2] if ratio_type=="SMA" else [])))
+        all_ema_periods = list(set(ema_periods + ([ratio_ma1, ratio_ma2] if ratio_type=="EMA" else [])))
 
-# -------------------------------
-# ADD NEW DATA (OPTIONAL)
-# -------------------------------
-st.markdown("---")
-st.subheader("📥 Add / Update Data")
+        for p in all_sma_periods:
+            g[f"sma{p}"] = g["close"].rolling(p).mean()
+        for p in all_ema_periods:
+            g[f"ema{p}"] = g["close"].ewm(span=p, adjust=False).mean()
 
-with st.form("add_data_form"):
-    c1, c2, c3 = st.columns(3)
-    symbol = c1.text_input("Symbol", value=selected_symbol)
-    date = c2.date_input("Date", value=datetime.today())
-    close = c3.number_input("Close Price", min_value=0.0, step=0.01)
+        g[f"vol_sma{vol_sma_period}"] = g["volume"].rolling(vol_sma_period).mean()
+        g["chg_daily"] = g["close"].pct_change(1) * 100
+        g["chg_weekly"] = g["close"].pct_change(5) * 100
+        g["chg_monthly"] = g["close"].pct_change(21) * 100
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    open_ = col1.number_input("Open", min_value=0.0, step=0.01)
-    high = col2.number_input("High", min_value=0.0, step=0.01)
-    low = col3.number_input("Low", min_value=0.0, step=0.01)
-    volume = col4.number_input("Volume", min_value=0, step=1)
+        if enable_rsi:
+            g[f"rsi_{rsi_period}"] = ta.rsi(g["close"], length=rsi_period)
+        if enable_adx:
+            adx = ta.adx(g["high"], g["low"], g["close"], length=adx_period)
+            g = pd.concat([g, adx], axis=1)
 
-    submitted = st.form_submit_button("Add / Update Record")
+        if ratio_type == "SMA":
+            col1, col2 = f"sma{ratio_ma1}", f"sma{ratio_ma2}"
+        else:
+            col1, col2 = f"ema{ratio_ma1}", f"ema{ratio_ma2}"
 
-if submitted:
-    new_row = pd.DataFrame([{
-        "symbol": symbol,
-        "date": date,
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume
-    }])
+        g[f"ratio_{ratio_type.lower()}{ratio_ma1}_{ratio_type.lower()}{ratio_ma2}"] = (
+            g[col1] / g[col2] * 100
+        )
 
-    try:
-        # Upsert (replace if existing)
-        upsert_query = text("""
-            INSERT INTO prices (symbol, date, open, high, low, close, volume)
-            VALUES (:symbol, :date, :open, :high, :low, :close, :volume)
-            ON CONFLICT (symbol, date)
-            DO UPDATE SET
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume;
-        """)
-        with engine.begin() as conn:
-            conn.execute(upsert_query, new_row.to_dict(orient="records"))
-        st.success("✅ Record added/updated successfully!")
-        st.cache_data.clear()  # clear cache so new data appears
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
+        results.append(g)
 
-# -------------------------------
-# FOOTER
-# -------------------------------
-st.markdown("---")
-st.caption("© 2025 Personal NSE Data Viewer — using free Supabase + Streamlit Cloud")
+    return pd.concat(results, ignore_index=True)
 
+
+def compute_relative_performance(df, benchmark_symbol):
+    bench = df[df["symbol"] == benchmark_symbol][["date", "close"]].rename(columns={"close": "bench_close"})
+    df = df.merge(bench, on="date", how="left")
+    df["relative_perf"] = (df["close"] / df["bench_close"]) * 100
+    return df
+
+
+def plot_stock_chart(data, symbol, sma_periods, ema_periods, enable_rsi=False, enable_adx=False):
+    if data.empty:
+        st.info("No data available for chart.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=data["date"], open=data["open"], high=data["high"],
+        low=data["low"], close=data["close"], name="Price",
+        increasing_line_color="green", decreasing_line_color="red"
+    ))
+
+    for p in sma_periods:
+        col = f"sma{p}"
+        if col in data.columns:
+            fig.add_trace(go.Scatter(x=data["date"], y=data[col],
+                                     mode="lines", name=f"SMA{p}", line=dict(width=2)))
+    for p in ema_periods:
+        col = f"ema{p}"
+        if col in data.columns:
+            fig.add_trace(go.Scatter(x=data["date"], y=data[col],
+                                     mode="lines", name=f"EMA{p}", line=dict(width=2, dash="dot")))
+
+    fig.add_trace(go.Bar(
+        x=data["date"], y=data["volume"], name="Volume",
+        yaxis="y2", marker=dict(color="rgba(0,123,255,0.3)")
+    ))
+
+    fig.update_layout(
+        title=f"{symbol} — Price, MAs & Volume",
+        yaxis=dict(title="Price"),
+        yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False),
+        xaxis=dict(rangeslider=dict(visible=False)),
+        height=600,
+        template="plotly_dark",
+        legend=dict(orientation="h", y=-0.25)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if enable_rsi:
+        rsi_col = [c for c in data.columns if "rsi_" in c]
+        if rsi_col:
+            st.write("### RSI")
+            st.line_chart(data.set_index("date")[rsi_col])
+
+    if enable_adx:
+        adx_cols = [c for c in ["ADX_14","DMP_14","DMN_14"] if c in data.columns]
+        if adx_cols:
+            st.write("### ADX")
+            st.line_chart(data.set_index("date")[adx_cols])
+
+# ----------------------------
+# STREAMLIT UI
+# ----------------------------
+st.set_page_config(page_title="NSE Screener", layout="wide")
+st.title("📈 NSE Screener — Relative Performance + RSI + ADX")
+
+with st.spinner("Loading data from Supabase..."):
+    df = load_data()
+
+# --- Indicator Configuration ---
+st.sidebar.header("⚙️ Indicator Settings")
+sma_input = st.sidebar.text_input("SMA Periods (comma separated)", "10,20,50")
+ema_input = st.sidebar.text_input("EMA Periods (comma separated)", "")  # default empty
+sma_periods = [int(x.strip()) for x in sma_input.split(",") if x.strip().isdigit()]
+ema_periods = [int(x.strip()) for x in ema_input.split(",") if x.strip().isdigit()]
+vol_sma_period = st.sidebar.number_input("Volume SMA Period", value=20, step=1)
+
+# Ratio Settings
+st.sidebar.markdown("### MA Ratio")
+ratio_type = st.sidebar.radio("Type", ["SMA", "EMA"], horizontal=True)
+ratio_ma1 = st.sidebar.number_input("MA1 Period", value=7, step=1)
+ratio_ma2 = st.sidebar.number_input("MA2 Period", value=65, step=1)
+
+# RSI / ADX Settings
+st.sidebar.markdown("### Momentum Indicators")
+enable_rsi = st.sidebar.checkbox("Enable RSI", False)
+rsi_period = st.sidebar.number_input("RSI Period", value=14, step=1)
+enable_adx = st.sidebar.checkbox("Enable ADX", False)
+adx_period = st.sidebar.number_input("ADX Period", value=14, step=1)
+
+# Relative Performance
+st.sidebar.markdown("### Relative Performance")
+enable_relative = st.sidebar.checkbox("Enable Relative Perf vs NIFTY", False)
+
+# Compute all indicators
+df = compute_indicators(df, sma_periods, ema_periods, vol_sma_period,
+                        ratio_type, ratio_ma1, ratio_ma2,
+                        enable_rsi, rsi_period, enable_adx, adx_period)
+
+if enable_relative:
+    df = compute_relative_performance(df, BENCHMARK_SYMBOL)
+
+latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
+
+# ----------------------------
+# FILTERS
+# ----------------------------
+st.sidebar.header("🔧 Filters")
+min_price = st.sidebar.number_input("Minimum Close Price", value=80.0, step=1.0)
+vol_multiplier = st.sidebar.number_input("Volume > X × Avg Volume", value=1.5, step=0.1)
+
+with st.sidebar.expander("% Change Filters (Optional)", expanded=True):
+    enable_daily = st.checkbox("Enable Daily % Change Filter", False)
+    if enable_daily:
+        daily_min = st.number_input("Daily % Change Min", value=-20.0)
+        daily_max = st.number_input("Daily % Change Max", value=20.0)
+
+    enable_weekly = st.checkbox("Enable Weekly % Change Filter", False)
+    if enable_weekly:
+        weekly_min = st.number_input("Weekly % Change Min", value=-20.0)
+        weekly_max = st.number_input("Weekly % Change Max", value=20.0)
+
+    enable_monthly = st.checkbox("Enable Monthly % Change Filter", False)
+    if enable_monthly:
+        monthly_min = st.number_input("Monthly % Change Min", value=-40.0)
+        monthly_max = st.number_input("Monthly % Change Max", value=40.0)
+
+# MA/EMA Conditions
+st.sidebar.markdown("### MA/EMA Conditions")
+ma_filters = {}
+for p in sma_periods:
+    ma_filters[f"sma{p}"] = st.sidebar.checkbox(f"Close > SMA{p}", True)
+for p in ema_periods:
+    ma_filters[f"ema{p}"] = st.sidebar.checkbox(f"Close > EMA{p}", False)
+vol_surge = st.sidebar.checkbox("Volume Surge (Vol > X×AvgVol)", True)
+
+# ----------------------------
+# APPLY FILTERS
+# ----------------------------
+f = latest.copy()
+f = f[f["close"] >= min_price]
+if enable_daily:
+    f = f[f["chg_daily"].between(daily_min, daily_max)]
+if enable_weekly:
+    f = f[f["chg_weekly"].between(weekly_min, weekly_max)]
+if enable_monthly:
+    f = f[f["chg_monthly"].between(monthly_min, monthly_max)]
+
+for col, active in ma_filters.items():
+    if active and col in f.columns:
+        f = f[f["close"] > f[col]]
+if vol_surge:
+    vol_col = f"vol_sma{vol_sma_period}"
+    if vol_col in f.columns:
+        f = f[f["volume"] > vol_multiplier * f[vol_col]]
+
+# ----------------------------
+# DISPLAY RESULTS
+# ----------------------------
+st.subheader(f"✅ {len(f)} Stocks Match Filters")
+
+cols = ["symbol", "date", "close", "volume", "chg_daily", "chg_weekly", "chg_monthly"]
+for p in sma_periods: cols.append(f"sma{p}")
+for p in ema_periods: cols.append(f"ema{p}")
+cols.append(f"vol_sma{vol_sma_period}")
+ratio_col = f"ratio_{ratio_type.lower()}{ratio_ma1}_{ratio_type.lower()}{ratio_ma2}"
+if ratio_col in f.columns: cols.append(ratio_col)
+if enable_relative: cols.append("relative_perf")
+if enable_rsi: cols.append(f"rsi_{rsi_period}")
+if enable_adx and f"ADX_{adx_period}" in f.columns: cols.append(f"ADX_{adx_period}")
+
+def highlight_ratio(val):
+    if pd.isna(val):
+        return ""
+    elif val > 100:
+        return "background-color: lightgreen; font-weight: bold"
+    elif val < 100:
+        return "background-color: lightcoral; font-weight: bold"
+    return ""
+
+st.dataframe(
+    f[cols].sort_values("symbol").style.applymap(highlight_ratio, subset=[ratio_col] if ratio_col in f.columns else []),
+    use_container_width=True
+)
+
+# ----------------------------
+# CHART VIEWER
+# ----------------------------
+st.markdown("### 📈 Stock Chart Viewer")
+if not f.empty:
+    symbols = f["symbol"].unique()
+    selected_symbol = st.selectbox("Select Symbol to View Chart", symbols)
+    if selected_symbol:
+        sym_df = df[df["symbol"] == selected_symbol].sort_values("date").tail(120)
+        plot_stock_chart(sym_df, selected_symbol, sma_periods, ema_periods, enable_rsi, enable_adx)
+else:
+    st.info("No stocks passed the filters.")
+
+# ----------------------------
+# EXPORT
+# ----------------------------
+csv = f.to_csv(index=False).encode("utf-8")
+st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
