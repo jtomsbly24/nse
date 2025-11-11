@@ -4,17 +4,17 @@ from sqlalchemy import create_engine, text
 import os
 from datetime import datetime
 
-# -------------------------------
-# DATABASE CONNECTION
-# -------------------------------
-
-# On Streamlit Cloud, use st.secrets for safety
-SUPABASE_DB_URL = os.environ.get(
-    "SUPABASE_DB_URL",
-    "postgresql://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+# ✅ Try to read from Streamlit Secrets first (secure)
+SUPABASE_DB_URL = st.secrets.get(
+    "DATABASE_URL",
+    os.environ.get(
+        "SUPABASE_DB_URL",
+        "postgresql+psycopg2://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres?sslmode=require"
+    ),
 )
 
-engine = create_engine(SUPABASE_DB_URL)
+# ✅ Create SQLAlchemy engine
+engine = create_engine(SUPABASE_DB_URL, pool_pre_ping=True)
 
 # -------------------------------
 # STREAMLIT PAGE SETUP
@@ -137,3 +137,4 @@ if submitted:
 # -------------------------------
 st.markdown("---")
 st.caption("© 2025 Personal NSE Data Viewer — using free Supabase + Streamlit Cloud")
+
