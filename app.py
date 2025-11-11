@@ -1,38 +1,148 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import pandas_ta as ta
 import plotly.graph_objects as go
 import os
+import yfinance as yf
+from time import sleep
+from datetime import datetime
 
 # ----------------------------
 # CONFIGURATION
 # ----------------------------
-# Use environment variable on Streamlit Cloud
 SUPABASE_DB_URL = os.environ.get(
     "SUPABASE_DB_URL",
     "postgresql://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres"
 )
 TABLE_NAME = "prices"
 BENCHMARK_SYMBOL = "NIFTY"
+SLEEP_BETWEEN_TICKERS = 0.2
 
-# Create engine once (cached)
+st.set_page_config(page_title="NSE Screener", layout="wide")
+st.title("📈 NSE Screener — Relative Performance + RSI + ADX")
+
+# ----------------------------
+# DATABASE CONNECTION
+# ----------------------------
 @st.cache_resource
 def get_engine():
     return create_engine(SUPABASE_DB_URL, pool_pre_ping=True)
+
 
 # ----------------------------
 # FUNCTIONS
 # ----------------------------
 @st.cache_data(ttl=600)
 def load_data():
-    """Load data from Supabase PostgreSQL instead of SQLite."""
     engine = get_engine()
     query = f"SELECT symbol, date, open, high, low, close, volume FROM {TABLE_NAME};"
     df = pd.read_sql(query, engine, parse_dates=["date"])
     return df
 
 
+def get_last_updated():
+    engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT MAX(date) FROM prices;")).scalar()
+        return result
+
+
+def update_daily_prices():
+    """Fetch latest data and update Supabase DB."""
+    engine = get_engine()
+
+    st.info("Fetching NSE tickers...")
+    nse_url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    nse_df = pd.read_csv(nse_url)
+    tickers = [t + ".NS" for t in nse_df["SYMBOL"].dropna().unique()]
+
+    last_dates = {}
+    with engine.connect() as conn:
+        for ticker in tickers:
+            symbol = ticker.split('.')[0]
+            result = conn.execute(text("SELECT MAX(date) FROM prices WHERE symbol = :s"), {"s": symbol}).scalar()
+            last_dates[ticker] = result
+
+    progress_bar = st.progress(0)
+    updated_count = 0
+
+    for i, ticker in enumerate(tickers):
+        symbol = ticker.split('.')[0]
+        try:
+            last_date = last_dates.get(ticker)
+            start = None
+            if last_date:
+                start = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+
+            data = yf.download(
+                ticker,
+                period="6mo" if not start else None,
+                start=start,
+                interval="1d",
+                progress=False,
+                auto_adjust=True
+            )
+
+            if data.empty:
+                continue
+
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = [col[0] for col in data.columns]
+
+            data.reset_index(inplace=True)
+            data.rename(columns={'Date': 'date'}, inplace=True)
+
+            df = pd.DataFrame({
+                'symbol': symbol,
+                'date': data['date'].dt.date,
+                'open': data['Open'],
+                'high': data['High'],
+                'low': data['Low'],
+                'close': data['Close'],
+                'volume': data['Volume'].fillna(0).astype(int)
+            })
+
+            df.to_sql("prices", engine, if_exists="append", index=False, method='multi')
+            updated_count += len(df)
+            sleep(SLEEP_BETWEEN_TICKERS)
+
+        except Exception as e:
+            st.warning(f"⚠️ {symbol}: {e}")
+
+        progress_bar.progress((i + 1) / len(tickers))
+
+    st.success(f"✅ Database updated successfully — {updated_count} new records added.")
+
+
+# ----------------------------
+# UPDATE SECTION
+# ----------------------------
+col1, col2 = st.columns([3, 1])
+with col1:
+    last_update = get_last_updated()
+    if last_update:
+        st.markdown(f"🕒 **Last Updated:** `{pd.to_datetime(last_update).strftime('%Y-%m-%d')}`")
+    else:
+        st.markdown("🕒 **Last Updated:** Not available")
+
+with col2:
+    if st.button("🔄 Update Daily Prices"):
+        update_daily_prices()
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.experimental_rerun()
+
+# ----------------------------
+# MAIN DATA LOAD
+# ----------------------------
+with st.spinner("Loading data from Supabase..."):
+    df = load_data()
+
+
+# ----------------------------
+# INDICATOR + FILTER LOGIC
+# ----------------------------
 def compute_indicators(df, sma_periods, ema_periods, vol_sma_period,
                        ratio_type, ratio_ma1, ratio_ma2,
                        enable_rsi, rsi_period, enable_adx, adx_period):
@@ -119,7 +229,7 @@ def plot_stock_chart(data, symbol, sma_periods, ema_periods, enable_rsi=False, e
         legend=dict(orientation="h", y=-0.25)
     )
     st.plotly_chart(fig, use_container_width=True)
-
+# --- RSI & ADX Subplots ---
     if enable_rsi:
         rsi_col = [c for c in data.columns if "rsi_" in c]
         if rsi_col:
@@ -138,7 +248,8 @@ def plot_stock_chart(data, symbol, sma_periods, ema_periods, enable_rsi=False, e
 st.set_page_config(page_title="NSE Screener", layout="wide")
 st.title("📈 NSE Screener — Relative Performance + RSI + ADX")
 
-with st.spinner("Loading data from Supabase..."):
+# Load Data
+with st.spinner("Loading database..."):
     df = load_data()
 
 # --- Indicator Configuration ---
