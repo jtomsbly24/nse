@@ -69,11 +69,18 @@ def update_daily_prices():
 
     for i, ticker in enumerate(tickers):
         try:
-            symbol = ticker.split(".")[0]
-            result = conn.execute(text("SELECT MAX(date) FROM prices WHERE symbol = :s"), {"s": symbol}).scalar()
-            last_date = result if result else None
-            start = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date else None
+            # Ensure symbol is always a plain string
+            symbol = str(ticker.split(".")[0])
 
+            # Safely fetch last date (Postgres sometimes returns a numpy object)
+            result = conn.execute(
+                text("SELECT MAX(date) FROM prices WHERE symbol = :s"),
+                {"s": symbol}
+            ).scalar()
+            last_date = pd.to_datetime(result) if result else None
+            start = (last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date is not None else None
+
+            # --- Fetch data from Yahoo Finance ---
             data = yf.download(
                 ticker,
                 period="6mo" if not start else None,
@@ -85,18 +92,17 @@ def update_daily_prices():
             if data.empty:
                 continue
 
+            # Handle multi-index columns from yfinance
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = [col[0] for col in data.columns]
+
             data.reset_index(inplace=True)
             data.rename(columns={'Date': 'date'}, inplace=True)
 
-            df = pd.DataFrame({
-                'symbol': symbol,
-                'date': data['date'],
-                'open': data['Open'],
-                'high': data['High'],
-                'low': data['Low'],
-                'close': data['Close'],
-                'volume': data['Volume']
-            })
+            # Create flat, clean dataframe
+            df = data[['date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
+            df.insert(0, 'symbol', symbol)
+            df.columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
 
             batch.append(df)
             last_fetched = symbol
@@ -117,7 +123,7 @@ def update_daily_prices():
             progress_placeholder.warning(f"⚠️ {ticker}: {e}")
             continue
 
-    # Upload remaining data (if any)
+    # --- Upload remaining data (if any) ---
     if batch:
         big_df = pd.concat(batch, ignore_index=True)
         big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
@@ -325,5 +331,6 @@ else:
 # ----------------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
+
 
 
