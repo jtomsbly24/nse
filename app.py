@@ -27,7 +27,7 @@ SLEEP_BETWEEN_TICKERS = 0.3
 engine = create_engine(SUPABASE_DB_URL)
 
 st.set_page_config(page_title="NSE Screener", layout="wide")
-st.title("📈 NSE Screener — Relative Performance + RSI + ADX + MA Ratios")
+st.title("📈 NSE Screener")
 
 # ----------------------------
 # FUNCTIONS
@@ -311,3 +311,4 @@ else:
 # ----------------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
+
