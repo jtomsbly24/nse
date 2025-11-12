@@ -56,56 +56,65 @@ def update_daily_prices():
     tickers = get_nse_tickers()
     updated_count = 0
     last_fetched = None
+    start_time = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = engine.connect()
+    with engine.connect() as conn:
+        for i, ticker in enumerate(tickers):
+            try:
+                symbol = ticker.split(".")[0]
 
-    for i, ticker in enumerate(tickers):
-        try:
-            symbol = ticker.split(".")[0]
-            result = conn.execute(text("SELECT MAX(date) FROM prices WHERE symbol = :s"), {"s": symbol}).scalar()
-            last_date = result if result else None
-            start = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date else None
+                # Find last date in DB
+                result = conn.execute(text("SELECT MAX(date) FROM prices WHERE symbol = :s"), {"s": symbol}).scalar()
+                last_date = result if result else None
+                start = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date else None
 
-            data = yf.download(
-                ticker,
-                period="6mo" if not start else None,
-                start=start,
-                interval="1d",
-                progress=False,
-                auto_adjust=True
-            )
-            if data.empty:
+                # Download data
+                data = yf.download(
+                    ticker,
+                    period="6mo" if not start else None,
+                    start=start,
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True
+                )
+                if data.empty:
+                    continue
+
+                # Handle multi-index
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = [col[0] for col in data.columns]
+
+                data.reset_index(inplace=True)
+                data.rename(columns={'Date': 'date'}, inplace=True)
+
+                df = pd.DataFrame({
+                    'symbol': symbol,
+                    'date': data['date'].dt.strftime('%Y-%m-%d'),
+                    'open': data['Open'],
+                    'high': data['High'],
+                    'low': data['Low'],
+                    'close': data['Close'],
+                    'volume': data['Volume']
+                })
+
+                # Append to DB
+                df.to_sql(TABLE_NAME, con=conn, if_exists='append', index=False)
+                updated_count += len(df)
+                last_fetched = symbol
+
+                progress_placeholder.write(f"📊 Updated **{symbol}** — {len(df)} rows added.")
+                status_box.info(f"🕒 Last fetched: **{last_fetched}** | Total: **{updated_count}** | Started: **{start_time}**")
+                time.sleep(SLEEP_BETWEEN_TICKERS)
+
+            except Exception as e:
+                progress_placeholder.warning(f"⚠️ {symbol}: {e}")
                 continue
 
-            data.reset_index(inplace=True)
-            data.rename(columns={'Date': 'date'}, inplace=True)
-
-            df = pd.DataFrame({
-                'symbol': symbol,
-                'date': data['date'],
-                'open': data['Open'],
-                'high': data['High'],
-                'low': data['Low'],
-                'close': data['Close'],
-                'volume': data['Volume']
-            })
-            df.to_sql(TABLE_NAME, engine, if_exists='append', index=False)
-
-            updated_count += len(df)
-            last_fetched = symbol
-            progress_placeholder.write(f"📊 Updated **{symbol}** — {len(df)} rows added.")
-            status_box.info(f"Last fetched: **{last_fetched}**  |  Total new rows: **{updated_count}**")
-            time.sleep(SLEEP_BETWEEN_TICKERS)
-
-        except Exception as e:
-            progress_placeholder.warning(f"⚠️ {ticker}: {e}")
-            continue
-
-    conn.close()
     st.success(f"✅ Update completed — {updated_count} new rows added.")
     if last_fetched:
         st.write(f"🕒 Last ticker processed: **{last_fetched}**")
     st.session_state["last_update"] = get_last_update_time()
+
 
 # ----------------------------
 # DISPLAY LAST DATABASE UPDATE
@@ -225,3 +234,4 @@ else:
 # ----------------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
+
