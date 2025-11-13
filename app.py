@@ -1,15 +1,16 @@
-import streamlit as st 
+# ----------------------------------------------
+# NSE SCREENER DASHBOARD (Supabase Cached Version)
+# ----------------------------------------------
+
+import streamlit as st
 import pandas as pd
 import yfinance as yf
 from sqlalchemy import create_engine, text
 import pandas_ta as ta
-import plotly.graph_objects as go
 import time
 import os
 
-# ----------------------------
-# CONFIGURATION
-# ----------------------------
+# -------------------- CONFIGURATION --------------------
 SUPABASE_DB_URL = os.environ.get(
     "SUPABASE_DB_URL",
     "postgresql://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres"
@@ -17,150 +18,55 @@ SUPABASE_DB_URL = os.environ.get(
 TABLE_NAME = "prices"
 BENCHMARK_SYMBOL = "NIFTY"
 SLEEP_BETWEEN_TICKERS = 0.3
-
 engine = create_engine(SUPABASE_DB_URL)
 
-st.set_page_config(page_title="NSE Screener", layout="wide")
-st.title("📈 NSE Screener")
+st.set_page_config(page_title="📈 NSE Screener", layout="wide")
 
-# ----------------------------
-# FUNCTIONS
-# ----------------------------
+st.markdown("""
+    <style>
+        .metric-card {
+            background-color: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.1);
+            padding: 16px;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1a73e8;
+        }
+        .metric-label {
+            font-size: 0.9rem;
+            color: #6b7280;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("📊 NSE Screener Dashboard")
+
+# -------------------- DATABASE FUNCTIONS --------------------
 @st.cache_data(show_spinner=False)
-def get_nse_tickers():
-    nse_url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    nse_df = pd.read_csv(nse_url)
-    return [t + ".NS" for t in nse_df["SYMBOL"].dropna().unique()]
-
 def get_last_update_time():
     try:
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT MAX(date) FROM prices")).scalar()
+            result = conn.execute(text(f"SELECT MAX(date) FROM {TABLE_NAME}")).scalar()
             if result:
                 return pd.to_datetime(result).strftime("%Y-%m-%d")
     except Exception:
         return None
     return None
 
+@st.cache_data(show_spinner=True)
 def load_data():
+    """Load full table from database (cached)"""
     query = f"SELECT symbol, date, open, high, low, close, volume FROM {TABLE_NAME}"
     with engine.connect() as conn:
         df = pd.read_sql_query(query, conn, parse_dates=["date"])
     return df
 
-def update_daily_prices():
-    st.info("⏳ Starting daily update process...")
-    progress_placeholder = st.empty()
-    status_box = st.empty()
-
-    tickers = get_nse_tickers()
-    updated_count = 0
-    last_fetched = None
-    batch = []
-    BATCH_SIZE = 100
-
-    conn = engine.connect()
-
-    for i, ticker in enumerate(tickers):
-        try:
-            symbol = str(ticker.split(".")[0])
-            result = conn.execute(
-                text("SELECT MAX(date) FROM prices WHERE symbol = :s"),
-                {"s": symbol}
-            ).scalar()
-            last_date = pd.to_datetime(result) if result else None
-            start = (last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date is not None else None
-
-            data = yf.download(
-                ticker,
-                period="6mo" if not start else None,
-                start=start,
-                interval="1d",
-                progress=False,
-                auto_adjust=True
-            )
-            if data.empty:
-                continue
-
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = [col[0] for col in data.columns]
-
-            data.reset_index(inplace=True)
-            data.rename(columns={'Date': 'date'}, inplace=True)
-
-            df = data[['date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-            df.insert(0, 'symbol', symbol)
-            df.columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
-
-            batch.append(df)
-            last_fetched = symbol
-            updated_count += len(df)
-
-            if len(batch) >= BATCH_SIZE:
-                big_df = pd.concat(batch, ignore_index=True)
-                big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
-                batch.clear()
-                progress_placeholder.write(f"📊 Batch of 100 tickers uploaded (last: **{symbol}**)")
-
-            status_box.info(f"Last fetched: **{last_fetched}**  |  Total new rows: **{updated_count}**")
-            time.sleep(SLEEP_BETWEEN_TICKERS)
-
-        except Exception as e:
-            progress_placeholder.warning(f"⚠️ {ticker}: {e}")
-            continue
-
-    if batch:
-        big_df = pd.concat(batch, ignore_index=True)
-        big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
-        progress_placeholder.write(f"📊 Final batch uploaded ({len(batch)} tickers)")
-
-    conn.close()
-    st.success(f"✅ Update completed — {updated_count} new rows added.")
-    if last_fetched:
-        st.write(f"🕒 Last ticker processed: **{last_fetched}**")
-    st.session_state["last_update"] = get_last_update_time()
-
-# ----------------------------
-# DISPLAY LAST DATABASE UPDATE
-# ----------------------------
-last_update = get_last_update_time()
-if "last_update" not in st.session_state:
-    st.session_state["last_update"] = last_update
-st.markdown(f"**🕒 Last Database Update:** {st.session_state['last_update'] or 'No data yet'}")
-
-# ----------------------------
-# UPDATE BUTTON
-# ----------------------------
-with st.sidebar:
-    st.header("⚙️ Controls")
-    if st.button("🔄 Update Daily Prices", use_container_width=True):
-        update_daily_prices()
-
-# ----------------------------
-# INDICATOR SETTINGS
-# ----------------------------
-st.sidebar.header("📊 Indicator Settings")
-sma_input = st.sidebar.text_input("SMA Periods", "10,20,50")
-ema_input = st.sidebar.text_input("EMA Periods", "")
-sma_periods = [int(x.strip()) for x in sma_input.split(",") if x.strip().isdigit()]
-ema_periods = [int(x.strip()) for x in ema_input.split(",") if x.strip().isdigit()]
-vol_sma_period = st.sidebar.number_input("Volume SMA Period", value=20, step=1)
-
-ratio_type = st.sidebar.radio("MA Ratio Type", ["SMA", "EMA"], horizontal=True)
-ratio_ma1 = st.sidebar.number_input("MA1", value=7)
-ratio_ma2 = st.sidebar.number_input("MA2", value=65)
-ratio_ma1 = int(ratio_ma1)
-ratio_ma2 = int(ratio_ma2)
-
-enable_rsi = st.sidebar.checkbox("Enable RSI", False)
-rsi_period = st.sidebar.number_input("RSI Period", value=14)
-enable_adx = st.sidebar.checkbox("Enable ADX", False)
-adx_period = st.sidebar.number_input("ADX Period", value=14)
-enable_relative = st.sidebar.checkbox("Enable Relative Perf vs NIFTY", False)
-
-# ----------------------------
-# LOAD AND COMPUTE DATA
-# ----------------------------
+# -------------------- COMPUTE INDICATORS (ONE TIME) --------------------
 @st.cache_data(show_spinner=True)
 def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
                        ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
@@ -169,28 +75,32 @@ def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
     results = []
 
     ma_needed = set(sma_periods + ema_periods)
-    if ratio_type == "SMA":
-        ma_needed.update([ratio_ma1, ratio_ma2])
-    else:
-        ma_needed.update([ratio_ma1, ratio_ma2])
+    ma_needed.update([ratio_ma1, ratio_ma2])
 
     for sym, g in df.groupby("symbol", group_keys=False):
         g = g.copy()
+
+        # SMAs and EMAs
         for p in sorted(ma_needed):
             g[f"sma{p}"] = g["close"].rolling(p).mean()
             g[f"ema{p}"] = g["close"].ewm(span=p, adjust=False).mean()
+
+        # Volume SMA
         g[f"vol_sma{vol_sma_period}"] = g["volume"].rolling(vol_sma_period).mean()
 
+        # % Changes
         g["chg_daily"] = g["close"].pct_change(1) * 100
         g["chg_weekly"] = g["close"].pct_change(5) * 100
         g["chg_monthly"] = g["close"].pct_change(21) * 100
 
+        # RSI & ADX
         if enable_rsi:
             g[f"rsi_{rsi_period}"] = ta.rsi(g["close"], length=rsi_period)
         if enable_adx:
             adx = ta.adx(g["high"], g["low"], g["close"], length=adx_period)
             g = pd.concat([g, adx], axis=1)
 
+        # Ratio
         if ratio_type == "SMA":
             col1, col2 = f"sma{ratio_ma1}", f"sma{ratio_ma2}"
         else:
@@ -209,20 +119,38 @@ def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
 
     return df
 
-with st.spinner("📂 Loading data from database..."):
+# -------------------- LOAD & COMPUTE --------------------
+with st.spinner("📂 Loading data from Supabase..."):
     df = load_data()
 
-df = compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
-                        ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
-                        enable_adx, adx_period, enable_relative)
+# --- Sidebar Config ---
+st.sidebar.header("📊 Indicator Settings")
+sma_input = st.sidebar.text_input("SMA Periods", "10,20,50")
+ema_input = st.sidebar.text_input("EMA Periods", "")
+sma_periods = [int(x.strip()) for x in sma_input.split(",") if x.strip().isdigit()]
+ema_periods = [int(x.strip()) for x in ema_input.split(",") if x.strip().isdigit()]
+vol_sma_period = st.sidebar.number_input("Volume SMA Period", value=20, step=1)
+
+ratio_type = st.sidebar.radio("MA Ratio Type", ["SMA", "EMA"], horizontal=True)
+ratio_ma1 = int(st.sidebar.number_input("MA1", value=7))
+ratio_ma2 = int(st.sidebar.number_input("MA2", value=65))
+
+enable_rsi = st.sidebar.checkbox("Enable RSI", False)
+rsi_period = st.sidebar.number_input("RSI Period", value=14)
+enable_adx = st.sidebar.checkbox("Enable ADX", False)
+adx_period = st.sidebar.number_input("ADX Period", value=14)
+enable_relative = st.sidebar.checkbox("Enable Relative Perf vs NIFTY", False)
+
+with st.spinner("⚙️ Computing indicators (one-time)..."):
+    df = compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
+                            ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
+                            enable_adx, adx_period, enable_relative)
 
 latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
 
-# ----------------------------
-# FILTERS
-# ----------------------------
+# -------------------- FILTERS --------------------
 st.sidebar.header("🔧 Filters")
-min_price = st.sidebar.number_input("Minimum Close Price", value=80.0)
+min_price = st.sidebar.number_input("Min Close Price", value=80.0)
 vol_multiplier = st.sidebar.number_input("Volume > X × Avg Volume", value=1.5, step=0.1)
 
 with st.sidebar.expander("% Change Filters", expanded=True):
@@ -247,9 +175,7 @@ for p in ema_periods:
     ma_filters[f"ema{p}"] = st.sidebar.checkbox(f"Close > EMA{p}", False)
 vol_surge = st.sidebar.checkbox("Volume Surge", True)
 
-# ----------------------------
-# APPLY FILTERS
-# ----------------------------
+# -------------------- APPLY FILTERS --------------------
 f = latest.copy()
 f = f[f["close"] >= min_price]
 if enable_daily:
@@ -268,10 +194,14 @@ if vol_surge:
     if vol_col in f.columns:
         f = f[f["volume"] > vol_multiplier * f[vol_col]]
 
-# ----------------------------
-# DISPLAY RESULTS
-# ----------------------------
-st.subheader(f"✅ {len(f)} Stocks Match Filters")
+# -------------------- METRICS --------------------
+col1, col2, col3 = st.columns(3)
+col1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(latest):,}</div><div class='metric-label'>Total Stocks</div></div>", unsafe_allow_html=True)
+col2.markdown(f"<div class='metric-card'><div class='metric-value'>{len(f):,}</div><div class='metric-label'>Passed Filters</div></div>", unsafe_allow_html=True)
+col3.markdown(f"<div class='metric-card'><div class='metric-value'>{f['chg_daily'].mean():.2f}%</div><div class='metric-label'>Avg Daily % Change</div></div>", unsafe_allow_html=True)
+
+# -------------------- RESULTS TABLE --------------------
+st.markdown("### 📋 Filtered Results")
 
 cols = ["symbol", "date", "close", "volume", "chg_daily", "chg_weekly", "chg_monthly"]
 for p in sma_periods: cols.append(f"sma{p}")
@@ -284,12 +214,9 @@ if enable_rsi: cols.append(f"rsi_{rsi_period}")
 if enable_adx and f"ADX_{adx_period}" in f.columns: cols.append(f"ADX_{adx_period}")
 
 def highlight_ratio(val):
-    if pd.isna(val):
-        return ""
-    elif val > 100:
-        return "background-color: lightgreen; font-weight: bold"
-    elif val < 100:
-        return "background-color: lightcoral; font-weight: bold"
+    if pd.isna(val): return ""
+    elif val > 100: return "background-color: #d1fae5; font-weight: bold"
+    elif val < 100: return "background-color: #fee2e2; font-weight: bold"
     return ""
 
 st.dataframe(
@@ -297,36 +224,6 @@ st.dataframe(
     use_container_width=True
 )
 
-# ----------------------------
-# CHART VIEWER
-# ----------------------------
-st.markdown("### 📊 Stock Chart Viewer")
-if not f.empty:
-    symbols = f["symbol"].unique()
-    selected_symbol = st.selectbox("Select Symbol", symbols)
-    if selected_symbol:
-        sym_df = df[df["symbol"] == selected_symbol].sort_values("date").tail(120)
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=sym_df["date"], open=sym_df["open"], high=sym_df["high"],
-            low=sym_df["low"], close=sym_df["close"],
-            increasing_line_color="green", decreasing_line_color="red", name="Price"
-        ))
-        for p in sma_periods:
-            col = f"sma{p}"
-            if col in sym_df.columns:
-                fig.add_trace(go.Scatter(x=sym_df["date"], y=sym_df[col], name=f"SMA{p}", line=dict(width=2)))
-        for p in ema_periods:
-            col = f"ema{p}"
-            if col in sym_df.columns:
-                fig.add_trace(go.Scatter(x=sym_df["date"], y=sym_df[col], name=f"EMA{p}", line=dict(width=2, dash="dot")))
-        fig.update_layout(title=f"{selected_symbol} — Price, MAs & Volume", height=600, template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("No stocks passed filters.")
-
-# ----------------------------
-# EXPORT
-# ----------------------------
+# -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
-st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
+st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
