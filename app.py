@@ -51,7 +51,7 @@ st.markdown("""
        style='display: inline-block; background-color: #1a73e8; color: white;
               padding: 12px 28px; border-radius: 10px; text-decoration: none;
               font-weight: 600; font-size: 1.05rem; box-shadow: 0 2px 5px rgba(0,0,0,0.2);'>
-        📈 Open Chartink Dashboard
+        📈 MARKET MONITOR
     </a>
 </div>
 """, unsafe_allow_html=True)
@@ -236,6 +236,7 @@ st.dataframe(
 # -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
+
 
 
 
