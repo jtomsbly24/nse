@@ -1,10 +1,4 @@
-# ----------------------------------------------
-# NSE SCREENER DASHBOARD (PostgreSQL Version)
-# Full Feature Restore: % change filters, ratios, RSI/ADX, volume surge, etc.
-# Last updated: 2025-11-11 18:47 IST
-# ----------------------------------------------
-
-import streamlit as st
+import streamlit as st 
 import pandas as pd
 import yfinance as yf
 from sqlalchemy import create_engine, text
@@ -62,17 +56,14 @@ def update_daily_prices():
     tickers = get_nse_tickers()
     updated_count = 0
     last_fetched = None
-    batch = []  # store dataframes for batch upload
-    BATCH_SIZE = 100  # upload every 100 tickers
+    batch = []
+    BATCH_SIZE = 100
 
     conn = engine.connect()
 
     for i, ticker in enumerate(tickers):
         try:
-            # Ensure symbol is always a plain string
             symbol = str(ticker.split(".")[0])
-
-            # Safely fetch last date (Postgres sometimes returns a numpy object)
             result = conn.execute(
                 text("SELECT MAX(date) FROM prices WHERE symbol = :s"),
                 {"s": symbol}
@@ -80,7 +71,6 @@ def update_daily_prices():
             last_date = pd.to_datetime(result) if result else None
             start = (last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date is not None else None
 
-            # --- Fetch data from Yahoo Finance ---
             data = yf.download(
                 ticker,
                 period="6mo" if not start else None,
@@ -92,14 +82,12 @@ def update_daily_prices():
             if data.empty:
                 continue
 
-            # Handle multi-index columns from yfinance
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = [col[0] for col in data.columns]
 
             data.reset_index(inplace=True)
             data.rename(columns={'Date': 'date'}, inplace=True)
 
-            # Create flat, clean dataframe
             df = data[['date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
             df.insert(0, 'symbol', symbol)
             df.columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
@@ -108,14 +96,12 @@ def update_daily_prices():
             last_fetched = symbol
             updated_count += len(df)
 
-            # --- Upload every 100 tickers in one go ---
             if len(batch) >= BATCH_SIZE:
                 big_df = pd.concat(batch, ignore_index=True)
                 big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
                 batch.clear()
                 progress_placeholder.write(f"📊 Batch of 100 tickers uploaded (last: **{symbol}**)")
 
-            # live update in UI
             status_box.info(f"Last fetched: **{last_fetched}**  |  Total new rows: **{updated_count}**")
             time.sleep(SLEEP_BETWEEN_TICKERS)
 
@@ -123,7 +109,6 @@ def update_daily_prices():
             progress_placeholder.warning(f"⚠️ {ticker}: {e}")
             continue
 
-    # --- Upload remaining data (if any) ---
     if batch:
         big_df = pd.concat(batch, ignore_index=True)
         big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
@@ -164,6 +149,8 @@ vol_sma_period = st.sidebar.number_input("Volume SMA Period", value=20, step=1)
 ratio_type = st.sidebar.radio("MA Ratio Type", ["SMA", "EMA"], horizontal=True)
 ratio_ma1 = st.sidebar.number_input("MA1", value=7)
 ratio_ma2 = st.sidebar.number_input("MA2", value=65)
+ratio_ma1 = int(ratio_ma1)
+ratio_ma2 = int(ratio_ma2)
 
 enable_rsi = st.sidebar.checkbox("Enable RSI", False)
 rsi_period = st.sidebar.number_input("RSI Period", value=14)
@@ -174,48 +161,60 @@ enable_relative = st.sidebar.checkbox("Enable Relative Perf vs NIFTY", False)
 # ----------------------------
 # LOAD AND COMPUTE DATA
 # ----------------------------
+@st.cache_data(show_spinner=True)
+def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
+                       ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
+                       enable_adx, adx_period, enable_relative):
+    df = df.sort_values(["symbol", "date"])
+    results = []
+
+    ma_needed = set(sma_periods + ema_periods)
+    if ratio_type == "SMA":
+        ma_needed.update([ratio_ma1, ratio_ma2])
+    else:
+        ma_needed.update([ratio_ma1, ratio_ma2])
+
+    for sym, g in df.groupby("symbol", group_keys=False):
+        g = g.copy()
+        for p in sorted(ma_needed):
+            g[f"sma{p}"] = g["close"].rolling(p).mean()
+            g[f"ema{p}"] = g["close"].ewm(span=p, adjust=False).mean()
+        g[f"vol_sma{vol_sma_period}"] = g["volume"].rolling(vol_sma_period).mean()
+
+        g["chg_daily"] = g["close"].pct_change(1) * 100
+        g["chg_weekly"] = g["close"].pct_change(5) * 100
+        g["chg_monthly"] = g["close"].pct_change(21) * 100
+
+        if enable_rsi:
+            g[f"rsi_{rsi_period}"] = ta.rsi(g["close"], length=rsi_period)
+        if enable_adx:
+            adx = ta.adx(g["high"], g["low"], g["close"], length=adx_period)
+            g = pd.concat([g, adx], axis=1)
+
+        if ratio_type == "SMA":
+            col1, col2 = f"sma{ratio_ma1}", f"sma{ratio_ma2}"
+        else:
+            col1, col2 = f"ema{ratio_ma1}", f"ema{ratio_ma2}"
+        if col1 in g.columns and col2 in g.columns:
+            g[f"ratio_{ratio_type.lower()}{ratio_ma1}_{ratio_type.lower()}{ratio_ma2}"] = g[col1] / g[col2] * 100
+
+        results.append(g)
+
+    df = pd.concat(results, ignore_index=True)
+
+    if enable_relative:
+        bench = df[df["symbol"] == BENCHMARK_SYMBOL][["date", "close"]].rename(columns={"close": "bench_close"})
+        df = df.merge(bench, on="date", how="left")
+        df["relative_perf"] = (df["close"] / df["bench_close"]) * 100
+
+    return df
+
 with st.spinner("📂 Loading data from database..."):
     df = load_data()
 
-df = df.sort_values(["symbol", "date"])
-results = []
-
-for sym, g in df.groupby("symbol", group_keys=False):
-    g = g.copy()
-    for p in sma_periods:
-        g[f"sma{p}"] = g["close"].rolling(p).mean()
-    for p in ema_periods:
-        g[f"ema{p}"] = g["close"].ewm(span=p, adjust=False).mean()
-    g[f"vol_sma{vol_sma_period}"] = g["volume"].rolling(vol_sma_period).mean()
-
-    # % changes
-    g["chg_daily"] = g["close"].pct_change(1) * 100
-    g["chg_weekly"] = g["close"].pct_change(5) * 100
-    g["chg_monthly"] = g["close"].pct_change(21) * 100
-
-    # RSI & ADX
-    if enable_rsi:
-        g[f"rsi_{rsi_period}"] = ta.rsi(g["close"], length=rsi_period)
-    if enable_adx:
-        adx = ta.adx(g["high"], g["low"], g["close"], length=adx_period)
-        g = pd.concat([g, adx], axis=1)
-
-    # Ratio
-    if ratio_type == "SMA":
-        col1, col2 = f"sma{ratio_ma1}", f"sma{ratio_ma2}"
-    else:
-        col1, col2 = f"ema{ratio_ma1}", f"ema{ratio_ma2}"
-    if col1 in g and col2 in g:
-        g[f"ratio_{ratio_type.lower()}{ratio_ma1}_{ratio_type.lower()}{ratio_ma2}"] = g[col1] / g[col2] * 100
-
-    results.append(g)
-
-df = pd.concat(results, ignore_index=True)
-
-if enable_relative:
-    bench = df[df["symbol"] == BENCHMARK_SYMBOL][["date", "close"]].rename(columns={"close": "bench_close"})
-    df = df.merge(bench, on="date", how="left")
-    df["relative_perf"] = (df["close"] / df["bench_close"]) * 100
+df = compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
+                        ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
+                        enable_adx, adx_period, enable_relative)
 
 latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
 
@@ -331,7 +330,3 @@ else:
 # ----------------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
-
-
-
-
