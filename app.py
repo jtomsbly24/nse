@@ -228,34 +228,54 @@ st.dataframe(
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
 
+
 # -----------------------------------------
-# 📊 MARKET SUMMARY TABLES
+# 📊 MARKET SUMMARY TABLES (Fixed Version)
 # -----------------------------------------
 st.markdown("### 📈 Market Summary")
 
-# Compute the metrics
 df_summary = df.copy()
-df_summary["above_ema20"] = df_summary["close"] > df_summary["sma20"]
-df_summary["pct_change"] = ((df_summary["close"] - df_summary["prev_close"]) / df_summary["prev_close"]) * 100
 
-# Add placeholder date (assuming 'last_date' exists)
+# Ensure date column exists
 if "last_date" in df_summary.columns:
     df_summary["date"] = pd.to_datetime(df_summary["last_date"])
 else:
     df_summary["date"] = pd.to_datetime("today")
 
+# --- Compute Previous Close (safe fallback) ---
+if "symbol" in df_summary.columns:
+    df_summary = df_summary.sort_values(["symbol", "date"])
+    df_summary["prev_close"] = df_summary.groupby("symbol")["close"].shift(1)
+else:
+    df_summary["prev_close"] = df_summary["close"].shift(1)
+
+# --- Calculate Daily % Change ---
+df_summary["pct_change"] = ((df_summary["close"] - df_summary["prev_close"]) / df_summary["prev_close"]) * 100
+df_summary["pct_change"] = df_summary["pct_change"].fillna(0)
+
+# --- EMA comparison ---
+if "sma20" in df_summary.columns:
+    df_summary["above_ema20"] = df_summary["close"] > df_summary["sma20"]
+else:
+    df_summary["above_ema20"] = False
+
+# --- Weekly % change if available ---
+if "weekly_change" not in df_summary.columns:
+    df_summary["weekly_change"] = df_summary["pct_change"].rolling(5).sum()  # approximate
+
+# --- Group by date ---
 summary_daily = (
     df_summary.groupby("date").apply(
         lambda g: pd.Series({
             "% Above EMA20": round((g["above_ema20"].sum() / len(g)) * 100, 2),
             "Up >4%": (g["pct_change"] > 4).sum(),
             "Down >4%": (g["pct_change"] < -4).sum(),
-            "Up >20% Weekly": (g["weekly_change"] > 20).sum() if "weekly_change" in g.columns else 0,
+            "Up >20% Weekly": (g["weekly_change"] > 20).sum(),
         })
     )
 ).reset_index()
 
-# Table 1: Summary by Day
+# --- Table 1: Market Summary ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -267,7 +287,7 @@ with col1:
         use_container_width=True,
     )
 
-# Table 2: Breadth Snapshot
+# --- Table 2: Breadth Snapshot ---
 with col2:
     up_count = (df_summary["pct_change"] > 0).sum()
     down_count = (df_summary["pct_change"] < 0).sum()
@@ -282,8 +302,10 @@ with col2:
     st.markdown("#### 📊 Breadth Snapshot")
     st.dataframe(
         breadth_df.style.apply(
-            lambda x: ["background-color: #d4edda" if "Up" in x.Direction else "background-color: #f8d7da",  # green/red bg
-                       "color: black"], axis=1
+            lambda x: [
+                "background-color: #d4edda" if "Up" in x.Direction else "background-color: #f8d7da"
+            ] * len(x),
+            axis=1
         ),
         use_container_width=True,
     )
