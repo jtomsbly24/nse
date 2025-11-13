@@ -45,7 +45,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 NSE Screener Dashboard")
-
+st.markdown("""
+<div style='text-align: center; margin: 15px 0 30px 0;'>
+    <a href='https://chartink.com/dashboard/280745?s=35' target='_blank'
+       style='display: inline-block; background-color: #1a73e8; color: white;
+              padding: 12px 28px; border-radius: 10px; text-decoration: none;
+              font-weight: 600; font-size: 1.05rem; box-shadow: 0 2px 5px rgba(0,0,0,0.2);'>
+        📈 Open Chartink Dashboard
+    </a>
+</div>
+""", unsafe_allow_html=True)
 # -------------------- DATABASE FUNCTIONS --------------------
 @st.cache_data(show_spinner=False)
 def get_last_update_time():
@@ -227,5 +236,6 @@ st.dataframe(
 # -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
+
 
 
