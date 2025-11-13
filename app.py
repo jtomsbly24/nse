@@ -243,7 +243,7 @@ with st.sidebar.expander("% Change Filters", expanded=True):
 ma_filters = {}
 st.sidebar.markdown("### MA/EMA Conditions")
 for p in sma_periods:
-    ma_filters[f"sma{p}"] = st.sidebar.checkbox(f"Close > SMA{p}", True)
+    ma_filters[f"sma{p}"] = st.sidebar.checkbox(f"Close > SMA{p}", False)
 for p in ema_periods:
     ma_filters[f"ema{p}"] = st.sidebar.checkbox(f"Close > EMA{p}", False)
 vol_surge = st.sidebar.checkbox("Volume Surge", True)
@@ -331,6 +331,7 @@ else:
 # ----------------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download Results as CSV", csv, "nse_screener_results.csv", "text/csv")
+
 
 
 
