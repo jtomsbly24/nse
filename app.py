@@ -232,11 +232,27 @@ with st.spinner("⚙️ Computing indicators (one-time)..."):
                             enable_adx, adx_period, enable_relative)
 
 latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
+# ---- Add Open, Open-Close Difference, Previous Day Volume ----
+prev_vol = (
+    df.sort_values("date")
+      .groupby("symbol")["volume"]
+      .shift(1)
+)
+
+df["prev_volume"] = prev_vol
+
+latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
+
+latest["open_close_diff"] = latest["open"] - latest["close"]
 
 # -------------------- FILTERS --------------------
 st.sidebar.header("🔧 Filters")
+
 min_price = st.sidebar.number_input("Min Close Price", value=80.0)
 vol_multiplier = st.sidebar.number_input("Volume > X × Avg Volume", value=1.5, step=0.1)
+# ---- Volume > Fixed Number Filter ----
+enable_vol_min = st.sidebar.checkbox("Enable Min Volume Filter", False)
+min_volume_value = st.sidebar.number_input("Min Volume Value", value=100000, step=5000)
 
 with st.sidebar.expander("% Change Filters", expanded=True):
     enable_daily = st.checkbox("Enable Daily % Filter", False)
@@ -278,6 +294,10 @@ if vol_surge:
     vol_col = f"vol_sma{vol_sma_period}"
     if vol_col in f.columns:
         f = f[f["volume"] > vol_multiplier * f[vol_col]]
+# ---- Apply Min Volume Filter ----
+if enable_vol_min:
+    f = f[f["volume"] >= min_volume_value]
+
 
 # -------------------- METRICS --------------------
 col1, col2, col3 = st.columns(3)
@@ -288,7 +308,9 @@ col3.markdown(f"<div class='metric-card'><div class='metric-value'>{f['chg_daily
 # -------------------- RESULTS TABLE --------------------
 st.markdown("### 📋 Filtered Results")
 
-cols = ["symbol", "date", "close", "volume", "chg_daily", "chg_weekly", "chg_monthly"]
+cols = ["symbol", "date", "open", "close", "volume", "open_close_diff", "prev_volume",
+        "chg_daily", "chg_weekly", "chg_monthly"]
+
 for p in sma_periods: cols.append(f"sma{p}")
 for p in ema_periods: cols.append(f"ema{p}")
 cols.append(f"vol_sma{vol_sma_period}")
@@ -312,4 +334,5 @@ st.dataframe(
 # -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
+
 
