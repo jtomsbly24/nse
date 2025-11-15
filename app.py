@@ -1,28 +1,37 @@
+# app.py
 # ----------------------------------------------
-# NSE SCREENER DASHBOARD (Supabase Cached Version with Update Logic)
+# NSE SCREENER DASHBOARD (GitHub SQLite Version)
 # ----------------------------------------------
 
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import create_engine, text
 import pandas_ta as ta
 import time
 import os
+import sqlite3
+import requests
+from io import BytesIO
 
-# -------------------- CONFIGURATION --------------------
-SUPABASE_DB_URL = os.environ.get(
-    "SUPABASE_DB_URL",
-    "postgresql://postgres.vlwlitpfwrtrzteouuyc:Jtomsbly837@aws-1-ap-southeast-2.pooler.supabase.com:5432/postgres"
-)
+# -------------------- CONFIG --------------------
+# EDIT THESE: set RAW_DB_URL to the raw.githubusercontent URL of your db
+# Example: "https://raw.githubusercontent.com/youruser/yourrepo/main/prices.db"
+RAW_DB_URL = st.secrets.get("RAW_DB_URL", "https://raw.githubusercontent.com/<YOUR_USERNAME>/<YOUR_REPO>/main/prices.db")
+
+# GitHub Action trigger settings (used by "Trigger Update" button)
+GH_OWNER = st.secrets.get("GH_OWNER", "<YOUR_USERNAME>")   # or put your username here
+GH_REPO = st.secrets.get("GH_REPO", "<YOUR_REPO>")        # or your repo name
+GH_WORKFLOW = st.secrets.get("GH_WORKFLOW", "update-db.yml")  # workflow file name in .github/workflows/
+# GH_PAT should be stored in Streamlit secrets as GH_PAT
+# e.g., in Streamlit Cloud: GH_PAT = ghp_xxx...
+
 TABLE_NAME = "prices"
 BENCHMARK_SYMBOL = "NIFTY"
 SLEEP_BETWEEN_TICKERS = 0.3
-engine = create_engine(SUPABASE_DB_URL)
 
 st.set_page_config(page_title="📈 NSE Screener", layout="wide")
 
-# -------------------- HEADER --------------------
+# -------------------- STYLES / HEADER --------------------
 st.markdown("""
     <style>
         .metric-card {
@@ -57,115 +66,134 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# -------------------- DATABASE FUNCTIONS --------------------
+# -------------------- DB DOWNLOAD & CONNECTION (cached) --------------------
+@st.cache_resource
+def download_and_connect(raw_url: str, local_filename: str = "prices.db"):
+    """
+    Download DB from GitHub raw URL to local file (only if missing),
+    then return an sqlite3 connection.
+    """
+    # download if not present
+    if not os.path.exists(local_filename):
+        # show a small status message (can't use st.* inside cache_resource reliably)
+        # so do a silent download; the UI above will inform when action occurs
+        r = requests.get(raw_url, timeout=60)
+        r.raise_for_status()
+        with open(local_filename, "wb") as f:
+            f.write(r.content)
+    conn = sqlite3.connect(local_filename, check_same_thread=False)
+    return conn
+
 @st.cache_data(show_spinner=False)
-def get_last_update_time():
+def get_last_update_time_from_db(conn):
     try:
-        with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT MAX(date) FROM {TABLE_NAME}")).scalar()
-            if result:
-                return pd.to_datetime(result).strftime("%Y-%m-%d")
+        q = f"SELECT MAX(date) FROM {TABLE_NAME}"
+        df = pd.read_sql_query(q, conn, parse_dates=["date"])
+        if not df.empty and df.iloc[0,0] is not None:
+            return pd.to_datetime(df.iloc[0,0]).strftime("%Y-%m-%d")
     except Exception:
         return None
     return None
 
 @st.cache_data(show_spinner=True)
-def load_data():
-    """Load full table from database (cached)"""
+def load_data_from_db(conn):
+    """Load full table from the SQLite DB (cached)."""
     query = f"SELECT symbol, date, open, high, low, close, volume FROM {TABLE_NAME}"
-    with engine.connect() as conn:
-        df = pd.read_sql_query(query, conn, parse_dates=["date"])
+    df = pd.read_sql_query(query, conn, parse_dates=["date"])
     return df
 
-# -------------------- UPDATE DATA FUNCTION --------------------
-def get_nse_tickers():
-    nse_url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    nse_df = pd.read_csv(nse_url)
-    return [t + ".NS" for t in nse_df["SYMBOL"].dropna().unique()]
-
-def update_daily_prices():
-    st.info("⏳ Starting daily update process...")
-    progress_placeholder = st.empty()
-    status_box = st.empty()
-
-    tickers = get_nse_tickers()
-    updated_count = 0
-    last_fetched = None
-    batch = []
-    BATCH_SIZE = 100
-
-    conn = engine.connect()
-
-    for i, ticker in enumerate(tickers):
+# helper to refresh cached DB file locally (call after GitHub Action completes)
+def refresh_local_db(local_filename="prices.db", raw_url=RAW_DB_URL):
+    if os.path.exists(local_filename):
         try:
-            symbol = str(ticker.split(".")[0])
-            result = conn.execute(
-                text(f"SELECT MAX(date) FROM {TABLE_NAME} WHERE symbol = :s"),
-                {"s": symbol}
-            ).scalar()
-            last_date = pd.to_datetime(result) if result else None
-            start = (last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d') if last_date is not None else None
-
-            data = yf.download(
-                ticker,
-                period="6mo" if not start else None,
-                start=start,
-                interval="1d",
-                progress=False,
-                auto_adjust=True
-            )
-            if data.empty:
-                continue
-
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = [col[0] for col in data.columns]
-
-            data.reset_index(inplace=True)
-            data.rename(columns={'Date': 'date'}, inplace=True)
-
-            df = data[['date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-            df.insert(0, 'symbol', symbol)
-            df.columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume']
-
-            batch.append(df)
-            last_fetched = symbol
-            updated_count += len(df)
-
-            if len(batch) >= BATCH_SIZE:
-                big_df = pd.concat(batch, ignore_index=True)
-                big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
-                batch.clear()
-                progress_placeholder.write(f"📊 Batch uploaded (last: **{symbol}**)")
-
-            status_box.info(f"Last fetched: **{last_fetched}** | Total new rows: **{updated_count}**")
-            time.sleep(SLEEP_BETWEEN_TICKERS)
-
+            os.remove(local_filename)
         except Exception as e:
-            progress_placeholder.warning(f"⚠️ {ticker}: {e}")
-            continue
+            st.warning(f"Could not remove cached DB file: {e}")
+            return False
+    # re-download and re-create connection via cache_resource by calling download
+    download_and_connect.clear()
+    load_data_from_db.clear()
+    get_last_update_time_from_db.clear()
+    # Accessing will cause fresh download and cache
+    _ = download_and_connect(raw_url, local_filename)
+    return True
 
-    if batch:
-        big_df = pd.concat(batch, ignore_index=True)
-        big_df.to_sql(TABLE_NAME, engine, if_exists='append', index=False, method='multi')
-        progress_placeholder.write(f"📊 Final batch uploaded ({len(batch)} tickers)")
+# -------------------- Initialize DB connection --------------------
+with st.spinner("📂 Downloading/connecting to DB from GitHub (cached)..."):
+    try:
+        conn = download_and_connect(RAW_DB_URL, local_filename="prices.db")
+    except Exception as e:
+        st.error(f"Failed to download DB from GitHub: {e}")
+        st.stop()
 
-    conn.close()
-    st.success(f"✅ Update completed — {updated_count} new rows added.")
-    if last_fetched:
-        st.write(f"🕒 Last ticker processed: **{last_fetched}**")
-    st.session_state["last_update"] = get_last_update_time()
+# -------------------- Trigger GitHub Action (manual) --------------------
+def trigger_github_workflow(owner: str, repo: str, workflow_file: str, token: str, ref: str = "main"):
+    """
+    Trigger a workflow_dispatch on GitHub.
+    Returns: (success_bool, status_message)
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+    payload = {"ref": ref}
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=20)
+    except Exception as e:
+        return False, f"Request error: {e}"
+    if r.status_code == 204:
+        return True, "Workflow triggered successfully."
+    else:
+        # return error text for debugging
+        return False, f"Error {r.status_code}: {r.text}"
 
-# -------------------- LAST UPDATE INFO + BUTTON --------------------
-last_update = get_last_update_time()
+# -------------------- LAST UPDATE INFO + TRIGGER BUTTON --------------------
+last_update = get_last_update_time_from_db(conn)
 if "last_update" not in st.session_state:
     st.session_state["last_update"] = last_update
 
-st.markdown(f"**🕒 Last Database Update:** {st.session_state['last_update'] or 'No data yet'}")
+col_a, col_b = st.columns([3, 1])
+with col_a:
+    st.markdown(f"**🕒 Last Database Update:** {st.session_state['last_update'] or 'No data yet'}")
+with col_b:
+    # Show trigger + refresh controls
+    if st.button("🔄 Trigger Update (GitHub Actions)", use_container_width=True):
+        gh_pat = st.secrets.get("GH_PAT")
+        if not gh_pat:
+            st.error("GH_PAT secret not found. Add your GitHub PAT to Streamlit secrets as GH_PAT.")
+        else:
+            with st.spinner("Triggering GitHub workflow..."):
+                ok, msg = trigger_github_workflow(GH_OWNER, GH_REPO, GH_WORKFLOW, gh_pat, ref="main")
+                if ok:
+                    st.success(msg + " Wait for Actions to finish and then click 'Refresh DB'.")
+                else:
+                    st.error(msg)
 
-if st.button("🔄 Update Daily Prices", use_container_width=True):
-    update_daily_prices()
+    if st.button("🔁 Refresh DB from GitHub", use_container_width=True):
+        with st.spinner("Refreshing local DB cache..."):
+            ok = refresh_local_db(local_filename="prices.db", raw_url=RAW_DB_URL)
+            if ok:
+                st.success("Local DB refreshed. Reloading data…")
+                # re-create connection object after refresh
+                conn = download_and_connect(RAW_DB_URL, local_filename="prices.db")
+                # clear data cache
+                load_data_from_db.clear()
+                get_last_update_time_from_db.clear()
+                st.session_state["last_update"] = get_last_update_time_from_db(conn)
+                st.experimental_rerun()
+            else:
+                st.error("Failed to refresh local DB.")
 
-# -------------------- INDICATORS + FILTERS (UNCHANGED) --------------------
+# -------------------- LOAD DATA FROM DB --------------------
+with st.spinner("📂 Loading data from local DB (cached)..."):
+    try:
+        df = load_data_from_db(conn)
+    except Exception as e:
+        st.error(f"Failed to read DB: {e}")
+        st.stop()
+
+# -------------------- INDICATORS & FILTERS (unchanged logic) --------------------
 @st.cache_data(show_spinner=True)
 def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
                        ratio_ma1, ratio_ma2, enable_rsi, rsi_period,
@@ -173,6 +201,7 @@ def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
     df = df.sort_values(["symbol", "date"])
     results = []
 
+    # gather MA periods needed
     ma_needed = set(sma_periods + ema_periods)
     ma_needed.update([ratio_ma1, ratio_ma2])
 
@@ -198,15 +227,12 @@ def compute_indicators(df, sma_periods, ema_periods, vol_sma_period, ratio_type,
             g[f"ratio_{ratio_type.lower()}{ratio_ma1}_{ratio_type.lower()}{ratio_ma2}"] = g[col1] / g[col2] * 100
         results.append(g)
 
-    df = pd.concat(results, ignore_index=True)
+    df_result = pd.concat(results, ignore_index=True)
     if enable_relative:
-        bench = df[df["symbol"] == BENCHMARK_SYMBOL][["date", "close"]].rename(columns={"close": "bench_close"})
-        df = df.merge(bench, on="date", how="left")
-        df["relative_perf"] = (df["close"] / df["bench_close"]) * 100
-    return df
-# -------------------- LOAD & COMPUTE --------------------
-with st.spinner("📂 Loading data from Supabase..."):
-    df = load_data()
+        bench = df_result[df_result["symbol"] == BENCHMARK_SYMBOL][["date", "close"]].rename(columns={"close": "bench_close"})
+        df_result = df_result.merge(bench, on="date", how="left")
+        df_result["relative_perf"] = (df_result["close"] / df_result["bench_close"]) * 100
+    return df_result
 
 # --- Sidebar Config ---
 st.sidebar.header("📊 Indicator Settings")
@@ -232,6 +258,7 @@ with st.spinner("⚙️ Computing indicators (one-time)..."):
                             enable_adx, adx_period, enable_relative)
 
 latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
+
 # ---- Add Open, Open-Close Difference, Previous Day Volume ----
 prev_vol = (
     df.sort_values("date")
@@ -240,9 +267,7 @@ prev_vol = (
 )
 
 df["prev_volume"] = prev_vol
-
 latest = df.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
-
 latest["open_close_diff"] = latest["open"] - latest["close"]
 
 # -------------------- FILTERS --------------------
@@ -298,7 +323,6 @@ if vol_surge:
 if enable_vol_min:
     f = f[f["volume"] >= min_volume_value]
 
-
 # -------------------- METRICS --------------------
 col1, col2, col3 = st.columns(3)
 col1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(latest):,}</div><div class='metric-label'>Total Stocks</div></div>", unsafe_allow_html=True)
@@ -334,5 +358,3 @@ st.dataframe(
 # -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
-
-
