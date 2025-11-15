@@ -16,7 +16,7 @@ from io import BytesIO
 # -------------------- CONFIG --------------------
 # EDIT THESE: set RAW_DB_URL to the raw.githubusercontent URL of your db
 # Example: "https://raw.githubusercontent.com/youruser/yourrepo/main/prices.db"
-RAW_DB_URL = st.secrets.get("RAW_DB_URL", "https://raw.githubusercontent.com/<YOUR_USERNAME>/<YOUR_REPO>/main/prices.db")
+RAW_DB_URL = st.secrets.get("RAW_DB_URL", "https://raw.githubusercontent.com/jtomsbly24/nse/main/prices.db")
 
 # GitHub Action trigger settings (used by "Trigger Update" button)
 GH_OWNER = st.secrets.get("GH_OWNER", "<YOUR_USERNAME>")   # or put your username here
@@ -358,3 +358,4 @@ st.dataframe(
 # -------------------- EXPORT --------------------
 csv = f.to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV", csv, "nse_screener_results.csv", "text/csv")
+
