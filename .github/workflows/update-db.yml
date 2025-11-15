@@ -1,18 +1,20 @@
 name: Update NSE Database (Manual Only)
 
 on:
-  workflow_dispatch:   # 👈 ONLY manual trigger
+  workflow_dispatch:   # 👈 ONLY manual trigger from GitHub UI
 
 jobs:
   update-db:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # required for pushing updated DB
+      contents: write   # allow pushing to repo
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0   # ensures pushes work correctly
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -26,10 +28,13 @@ jobs:
       - name: Run update script
         run: python update_db.py
 
-      - name: Commit and push updated DB
+      - name: Commit and push updated DB + backups
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
+
           git add prices.db
-          git commit -m "Manual update trigger: $(date)" || echo "No changes"
-          git push
+          git add backups/*.db || true   # add backup files if any
+
+          git commit -m "Manual update: $(date)" || echo "No changes"
+          git push origin HEAD:main
