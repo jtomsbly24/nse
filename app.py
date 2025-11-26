@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ------------------- CONFIG -------------------
-RAW_DB_URL = "http://<YOUR_SERVER_IP>/db/prices.db"  # Update with your NGINX URL
+RAW_DB_URL = "http://152.67.7.184/db/prices.db"  # Update with your NGINX URL
 LOCAL_DB = "prices.db"
 BENCHMARK_SYMBOL = "^NSEI"
 
@@ -172,3 +172,4 @@ for name, df_bucket in buckets.items():
     st.dataframe(df_bucket[cols].sort_values("ticker"), use_container_width=True)
     csv_bucket = df_bucket[cols].to_csv(index=False).encode("utf-8")
     st.download_button(f"💾 Download {name} CSV", csv_bucket, f"{name}_stocks.csv", "text/csv")
+
