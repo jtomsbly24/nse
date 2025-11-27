@@ -97,8 +97,8 @@ except Exception as e:
 st.header("📊 Database Summary")
 
 @st.cache_data(ttl=3600, show_spinner=True)
-def load_full_db(conn):
-    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn, parse_dates=["date"])
+def load_full_db(_conn):
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", _conn, parse_dates=["date"])
     # normalize ticker field if needed
     if "ticker" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "ticker"})
@@ -119,5 +119,6 @@ col3.metric("Latest Date", f"{latest_date}")
 st.write("---")
 st.subheader("📄 Data Preview")
 st.dataframe(df.head(50), use_container_width=True)
+
 
 
