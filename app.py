@@ -1,4 +1,4 @@
-# app.py — NSE Scanner Engine (Robust + Cached)
+# app.py — NSE Scanner Engine (Robust Loader + Fixed Metrics)
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -35,7 +35,6 @@ def download_file(url, local_path, timeout=60):
             pass
         return False, str(e)
 
-
 # ---------------- DB Loader ----------------
 @st.cache_resource
 def load_db_resource(local_path=LOCAL_DB, url=RAW_DB_URL, force_download=False):
@@ -50,7 +49,6 @@ def load_db_resource(local_path=LOCAL_DB, url=RAW_DB_URL, force_download=False):
             raise RuntimeError(f"Download failed: {err}")
     conn = sqlite3.connect(local_path, check_same_thread=False)
     return conn
-
 
 # ---------------- Raw Prices Loader ----------------
 @st.cache_data(show_spinner=False)
@@ -99,7 +97,6 @@ def load_raw_prices(_conn, table_name=EXPECTED_TABLE):
     df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
     return df
 
-
 # ---------------- Indicator Engine ----------------
 @st.cache_data(ttl=3600, show_spinner=True)
 def compute_indicators(df):
@@ -124,7 +121,6 @@ def compute_indicators(df):
         g["low20"] = g["low"].rolling(20, min_periods=1).min()
         out.append(g)
     return pd.concat(out, ignore_index=True)
-
 
 # ---------------- UI & Controls ----------------
 st.sidebar.header("DB Controls")
@@ -158,7 +154,7 @@ st.write(df_raw.dtypes)
 
 st.write("---")
 st.subheader("Sample rows (first 10)")
-st.dataframe(df_raw.head(10), use_container_width=True)
+st.dataframe(df_raw.head(10), width='stretch')
 
 # Compute indicators
 with st.spinner("Computing indicators..."):
@@ -169,7 +165,7 @@ st.success("Indicators computed (cached).")
 latest_date = df_ind["date"].max().date() if not df_ind.empty else "N/A"
 unique_symbols = df_ind["symbol"].nunique() if "symbol" in df_ind.columns else 0
 st.metric("Symbols", unique_symbols)
-st.metric("Latest Date in DB", latest_date)
+st.metric("Latest Date in DB", str(latest_date))  # <-- convert date to string
 st.write("---")
 
 # Latest row per symbol
@@ -181,7 +177,7 @@ display_cols = [
 display_cols = [c for c in display_cols if c in latest_rows.columns]
 
 st.subheader("Latest snapshot (one row per symbol)")
-st.dataframe(latest_rows[display_cols].sort_values("symbol").reset_index(drop=True), use_container_width=True)
+st.dataframe(latest_rows[display_cols].sort_values("symbol").reset_index(drop=True), width='stretch')
 
 # CSV export
 csv_full = df_ind.to_csv(index=False).encode("utf-8")
