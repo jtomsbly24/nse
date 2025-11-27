@@ -27,7 +27,7 @@ def safe_download_db(url=RAW_DB_URL, local_path=LOCAL_DB, max_retries=4, min_siz
     for attempt in range(1, max_retries + 1):
         try:
             st.info(f"Downloading DB (attempt {attempt}/{max_retries})...")
-            r = requests.get(url, stream=True, timeout=90)
+            r = requests.get(url, stream=True, timeout=120)
             r.raise_for_status()
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -220,4 +220,5 @@ csv = f[display_cols].to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV (filtered)", csv, "filtered_nse.csv", "text/csv")
 
 st.info("Minimal UI + filters active. Sort order: Relative Strength (descending) when available.")
+
 
