@@ -4,6 +4,7 @@ import os
 import time
 import requests
 import pandas as pd
+import pandas_ta as ta
 
 # ---------------- CONFIG ----------------
 RAW_DB_URL = "http://152.67.7.184/db/prices.db"
@@ -11,7 +12,8 @@ LOCAL_DB = "prices.db"
 TABLE_NAME = "raw_prices"
 
 st.set_page_config(page_title="NSE DB Tester", layout="wide")
-st.title("📦 NSE Database Loader Test")
+st.title("📦 NSE Database Loader + Indicators")
+
 
 # ----------------- SAFE DOWNLOAD -----------------
 def safe_download_db(url=RAW_DB_URL, local_path=LOCAL_DB, max_retries=4, min_size=5000):
@@ -80,28 +82,34 @@ try:
     tables = pd.read_sql_query(
         "SELECT name FROM sqlite_master WHERE type='table'", conn
     )
-    st.write("📌 Tables found in DB:", tables)
+    st.write("📌 Tables found in DB:", tables["name"].tolist())
 
     if TABLE_NAME not in tables["name"].values:
-        st.error(f"❌ Expected table '{TABLE_NAME}' NOT found.")
+        st.error(f"❌ Expected table '{TABLE_NAME}' NOT found in database!")
         st.stop()
 
     df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME} LIMIT 500", conn)
     st.success(f"✔ Table `{TABLE_NAME}` loaded — rows previewing below:")
-
     st.dataframe(df, use_container_width=True)
 
 except Exception as e:
     st.error(f"DB Error: {e}")
 
+
+# ---------------- Load Entire DB (Cached) ----------------
 st.header("📊 Database Summary")
 
 @st.cache_data(ttl=3600, show_spinner=True)
-def load_full_db(conn):
-    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn, parse_dates=["date"])
+def load_full_db(_conn):
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", _conn)
+    
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
     # normalize ticker field if needed
     if "ticker" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "ticker"})
+
     return df
 
 df = load_full_db(conn)
@@ -117,6 +125,53 @@ col2.metric("Tickers", f"{unique_tickers}")
 col3.metric("Latest Date", f"{latest_date}")
 
 st.write("---")
-st.subheader("📄 Data Preview")
+st.subheader("📄 Full Data Preview")
 st.dataframe(df.head(50), use_container_width=True)
 
+
+# ---------------- Indicator Section ----------------
+st.header("📈 Technical Indicators")
+
+# --- Ticker selection ---
+tickers = sorted(df["ticker"].unique())
+selected_ticker = st.selectbox("Select Ticker", tickers)
+
+# Filter and sort data
+ticker_df = df[df["ticker"] == selected_ticker].copy().sort_values("date")
+
+# --- Indicator selection ---
+available_indicators = ["SMA", "EMA", "RSI", "MACD", "BBANDS"]
+indicator_choice = st.multiselect(
+    "Select Indicators",
+    available_indicators,
+    default=["SMA", "RSI"]
+)
+
+# --- Cached indicator calculator ---
+@st.cache_data(ttl=1800)
+def compute_indicators(data, indicators):
+    data = data.copy()
+
+    if "SMA" in indicators:
+        data["SMA_20"] = ta.sma(data["close"], length=20)
+
+    if "EMA" in indicators:
+        data["EMA_20"] = ta.ema(data["close"], length=20)
+
+    if "RSI" in indicators:
+        data["RSI"] = ta.rsi(data["close"], length=14)
+
+    if "MACD" in indicators:
+        macd = ta.macd(data["close"])
+        data = pd.concat([data, macd], axis=1)
+
+    if "BBANDS" in indicators:
+        bb = ta.bbands(data["close"])
+        data = pd.concat([data, bb], axis=1)
+
+    return data
+
+result_df = compute_indicators(ticker_df, indicator_choice)
+
+st.subheader("📄 Result Data (Latest 50 rows)")
+st.dataframe(result_df.tail(50), use_container_width=True)
