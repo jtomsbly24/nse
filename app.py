@@ -1,186 +1,173 @@
-# app.py — NSE Scanner Engine (Robust Loader + Fixed Metrics)
 import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import time
+import requests
 
 # ---------------- CONFIG ----------------
 RAW_DB_URL = "http://152.67.7.184/db/prices.db"
 LOCAL_DB = "prices.db"
-EXPECTED_TABLE = "raw_prices"
+TABLE_NAME = "raw_prices"
 
-st.set_page_config(page_title="NSE Scanner", layout="wide")
-st.title("📊 NSE Strategy Scanner Engine (Robust Loader)")
+st.set_page_config(page_title="📊 NSE Strategy Scanner", layout="wide")
+st.title("📊 NSE Strategy Scanner Engine (Base Layer)")
 
-# ---------------- DB Download Helper ----------------
-def download_file(url, local_path, timeout=60):
-    import requests
-    try:
-        resp = requests.get(url, timeout=timeout, stream=True)
-        resp.raise_for_status()
-        tmp = local_path + ".tmp"
-        with open(tmp, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        os.replace(tmp, local_path)
-        return True, None
-    except Exception as e:
-        try:
-            tmp = local_path + ".tmp"
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-        return False, str(e)
+# ----------------- DB DOWNLOAD -----------------
+def download_file(url, local_path):
+    resp = requests.get(url, timeout=60)
+    if resp.status_code == 200:
+        with open(local_path, "wb") as f:
+            f.write(resp.content)
+        return True
+    return False
 
-# ---------------- DB Loader ----------------
 @st.cache_resource
-def load_db_resource(local_path=LOCAL_DB, url=RAW_DB_URL, force_download=False):
-    if force_download and os.path.exists(local_path):
-        try:
-            os.remove(local_path)
-        except Exception:
-            pass
-    if not os.path.exists(local_path):
-        ok, err = download_file(url, local_path)
+def load_db(force=False):
+    if force and os.path.exists(LOCAL_DB):
+        os.remove(LOCAL_DB)
+    if not os.path.exists(LOCAL_DB):
+        st.info("📥 Downloading DB...")
+        ok = download_file(RAW_DB_URL, LOCAL_DB)
         if not ok:
-            raise RuntimeError(f"Download failed: {err}")
-    conn = sqlite3.connect(local_path, check_same_thread=False)
+            st.error("❌ Failed downloading DB")
+            st.stop()
+    conn = sqlite3.connect(LOCAL_DB, check_same_thread=False)
     return conn
 
-# ---------------- Raw Prices Loader ----------------
-@st.cache_data(show_spinner=False)
-def load_raw_prices(_conn, table_name=EXPECTED_TABLE):
-    """
-    Loads price table, normalizes 'symbol', parses date.
-    """
-    # list tables
-    tables_df = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", _conn)
-    table_list = tables_df["name"].tolist()
-    if table_name not in table_list:
-        raise ValueError(f"Expected table '{table_name}' not found. Available tables: {table_list}")
+if st.button("🔁 Force DB Refresh"):
+    conn = load_db(force=True)
+else:
+    conn = load_db()
 
-    df = pd.read_sql(f"SELECT * FROM {table_name}", _conn)
-
-    # --- Normalize symbol/ticker ---
-    cols_lower = [c.lower() for c in df.columns]
-    if "symbol" in cols_lower:
-        symbol_col = [c for c in df.columns if c.lower() == "symbol"][0]
-    elif "ticker" in cols_lower:
-        symbol_col = [c for c in df.columns if c.lower() == "ticker"][0]
-        df = df.rename(columns={symbol_col: "symbol"})
-        symbol_col = "symbol"
-    else:
-        raise ValueError(f"Table must contain 'symbol' or 'ticker'. Found columns: {df.columns.tolist()}")
-
-    # --- Normalize date ---
-    date_col = None
-    for c in df.columns:
-        if c.lower() == "date":
-            date_col = c
-            break
-    if date_col is None:
-        raise ValueError("No 'date' column found in table.")
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    if date_col != "date":
-        df = df.rename(columns={date_col: "date"})
-
-    # --- Check required columns ---
-    required = ["symbol", "date", "open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c.lower() not in [x.lower() for x in df.columns]]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    # --- Sort by symbol & date ---
-    df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
+# ----------------- LOAD RAW PRICES -----------------
+@st.cache_data
+def load_raw_prices(_conn):
+    tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", _conn)
+    if TABLE_NAME not in tables["name"].values:
+        st.error(f"❌ Table `{TABLE_NAME}` missing in DB.")
+        st.stop()
+    df = pd.read_sql(f"SELECT * FROM {TABLE_NAME}", _conn, parse_dates=["date"])
+    df.sort_values(["symbol", "date"], inplace=True)
     return df
 
-# ---------------- Indicator Engine ----------------
-@st.cache_data(ttl=3600, show_spinner=True)
+df_raw = load_raw_prices(conn)
+st.success(f"✔ Loaded {len(df_raw):,} rows from `{TABLE_NAME}`.")
+
+# ----------------- COMPUTE INDICATORS -----------------
+@st.cache_data(show_spinner=True)
 def compute_indicators(df):
-    """
-    Compute indicators per symbol.
-    """
     out = []
-    for sym, g in df.groupby("symbol", sort=True):
-        g = g.sort_values("date").reset_index(drop=True).copy()
-        g["ema50"] = g["close"].ewm(span=50, adjust=False).mean()
-        g["sma150"] = g["close"].rolling(150, min_periods=1).mean()
-        g["sma200"] = g["close"].rolling(200, min_periods=1).mean()
-        tr1 = (g["high"] - g["low"]).abs()
-        tr2 = (g["high"] - g["close"].shift(1)).abs()
-        tr3 = (g["low"] - g["close"].shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        g["atr14"] = tr.rolling(14, min_periods=1).mean()
-        g["vol_avg20"] = g["volume"].rolling(20, min_periods=1).mean()
-        g["vol_avg50"] = g["volume"].rolling(50, min_periods=1).mean()
+    for sym, g in df.groupby("symbol"):
+        g = g.copy()
+        g["ema20"] = g["close"].ewm(span=20).mean()
+        g["ema50"] = g["close"].ewm(span=50).mean()
+        g["sma150"] = g["close"].rolling(150).mean()
+        g["sma200"] = g["close"].rolling(200).mean()
+        g["atr14"] = (g["high"] - g["low"]).rolling(14).mean()
+        g["vol_avg20"] = g["volume"].rolling(20).mean()
+        g["vol_avg50"] = g["volume"].rolling(50).mean()
         g["chg_daily_pct"] = g["close"].pct_change(1) * 100
-        g["high20"] = g["high"].rolling(20, min_periods=1).max()
-        g["low20"] = g["low"].rolling(20, min_periods=1).min()
+        g["chg_weekly_pct"] = g["close"].pct_change(5) * 100
+        g["high5"] = g["high"].rolling(5).max()
+        g["high10"] = g["high"].rolling(10).max()
+        g["high20"] = g["high"].rolling(20).max()
+        g["high200"] = g["high"].rolling(200).max()
+        # optional RSI if column exists
+        if "rsi14" not in g.columns:
+            g["rsi14"] = pd.NA
         out.append(g)
-    return pd.concat(out, ignore_index=True)
+    df_ind = pd.concat(out, ignore_index=True)
+    return df_ind
 
-# ---------------- UI & Controls ----------------
-st.sidebar.header("DB Controls")
-force_refresh = st.sidebar.button("🔁 Force DB Refresh (download fresh)")
+df_ind = compute_indicators(df_raw)
+st.success("✔ Indicators computed.")
 
-# Load DB
-try:
-    conn = load_db_resource(force_download=force_refresh)
-except Exception as e:
-    st.error(f"Failed to load DB: {e}")
-    st.stop()
+# ----------------- STRATEGY FILTERS -----------------
+STRATEGIES = {
+    "Minervini Stage 2": [
+        {"column": "ema50", "operator": ">", "value": "ema50"},  # Close > EMA50
+        {"column": "sma150", "operator": ">", "value": "sma150"},  # Close > SMA150
+        {"column": "sma200", "operator": ">", "value": "sma200"},  # Close > SMA200
+        {"column": "close", "operator": ">=", "value": 0.8, "ref": "high200"},  # Close ≥ 80% of 200D High
+        {"column": "volume", "operator": ">", "value": 1.5, "ref": "vol_avg20"},  # Volume surge
+        {"column": "chg_daily_pct", "operator": ">", "value": 0},  # Daily % change
+    ],
+    "Qullamaggie Swing": [
+        {"column": "chg_daily_pct", "operator": ">", "value": 2},  # Daily % change
+        {"column": "chg_weekly_pct", "operator": ">", "value": 3},  # Weekly % change
+        {"column": "close", "operator": ">", "value": "ema20"},  # Close > EMA20
+        {"column": "close", "operator": ">", "value": "high5"},  # Break 5-day high
+        {"column": "volume", "operator": ">", "value": 1.5, "ref": "vol_avg20"},  # Volume surge
+    ],
+    "StockBee Momentum Burst": [
+        {"column": "chg_daily_pct", "operator": ">", "value": 3},  # Rapid daily move
+        {"column": "volume", "operator": ">", "value": 2, "ref": "vol_avg50"},  # Volume spike
+        {"column": "atr14", "operator": ">", "value": 0.3},  # ATR threshold
+        {"column": "close", "operator": ">", "value": "high10"},  # Close > 10-day high
+    ]
+}
 
-# Diagnostics
-try:
-    st.sidebar.write("Local DB size:", os.path.getsize(LOCAL_DB) if os.path.exists(LOCAL_DB) else "n/a")
-    tables_df = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)
-    st.sidebar.write("Tables:", tables_df["name"].tolist())
-except Exception as e:
-    st.sidebar.warning(f"Could not list tables: {e}")
+st.sidebar.header("📌 Select Strategy & Filters")
+selected_strats = st.sidebar.multiselect("Select Strategy", list(STRATEGIES.keys()), default=["Minervini Stage 2"])
 
-# Load raw_prices
-try:
-    df_raw = load_raw_prices(conn, EXPECTED_TABLE)
-except Exception as e:
-    st.error(f"Error loading table '{EXPECTED_TABLE}': {e}")
-    st.stop()
+# Dynamically create inputs for all selected strategies
+user_filters = {}
+for strat in selected_strats:
+    st.sidebar.markdown(f"**{strat} Filters**")
+    for f in STRATEGIES[strat]:
+        col = f["column"]
+        op = f["operator"]
+        val = f["value"]
+        ref = f.get("ref", None)
+        key = f"{strat}_{col}_{ref or ''}"
 
-st.success(f"Loaded raw_prices — rows: {len(df_raw):,}")
-st.write("Columns and dtypes:")
-st.write(df_raw.dtypes)
+        if isinstance(val, (int, float)):
+            user_val = st.sidebar.number_input(f"{col} {op} ?", value=float(val), step=0.1, key=key)
+            user_filters[key] = user_val
+        elif isinstance(val, str):
+            # Column reference
+            user_filters[key] = val
+        elif isinstance(val, float) and ref:
+            user_filters[key] = val
 
-st.write("---")
-st.subheader("Sample rows (first 10)")
-st.dataframe(df_raw.head(10), width='stretch')
+# ----------------- APPLY FILTERS -----------------
+df_filtered = pd.DataFrame()
+for strat in selected_strats:
+    temp = df_ind.copy()
+    for f in STRATEGIES[strat]:
+        col = f["column"]
+        op = f["operator"]
+        val = f["value"]
+        ref = f.get("ref", None)
+        key = f"{strat}_{col}_{ref or ''}"
 
-# Compute indicators
-with st.spinner("Computing indicators..."):
-    df_ind = compute_indicators(df_raw)
-st.success("Indicators computed (cached).")
+        # Determine comparison value
+        if isinstance(val, (int, float)) and ref:
+            comp_val = user_filters[key] * temp[ref]
+        elif isinstance(val, str) and val in temp.columns:
+            comp_val = temp[val]
+        else:
+            comp_val = user_filters[key]
 
-# Summary metrics
-latest_date = df_ind["date"].max().date() if not df_ind.empty else "N/A"
-unique_symbols = df_ind["symbol"].nunique() if "symbol" in df_ind.columns else 0
-st.metric("Symbols", unique_symbols)
-st.metric("Latest Date in DB", str(latest_date))  # <-- convert date to string
-st.write("---")
+        # Apply operator
+        if op == ">":
+            temp = temp[temp[col] > comp_val]
+        elif op == ">=":
+            temp = temp[temp[col] >= comp_val]
+        elif op == "<":
+            temp = temp[temp[col] < comp_val]
+        elif op == "<=":
+            temp = temp[temp[col] <= comp_val]
 
-# Latest row per symbol
-latest_rows = df_ind.sort_values("date").groupby("symbol").tail(1).reset_index(drop=True)
-display_cols = [
-    "symbol", "date", "close", "chg_daily_pct", "ema50", "sma150", "sma200",
-    "atr14", "vol_avg20", "vol_avg50", "high20", "low20"
-]
-display_cols = [c for c in display_cols if c in latest_rows.columns]
+    df_filtered = pd.concat([df_filtered, temp])
 
-st.subheader("Latest snapshot (one row per symbol)")
-st.dataframe(latest_rows[display_cols].sort_values("symbol").reset_index(drop=True), width='stretch')
+df_filtered = df_filtered.drop_duplicates(subset=["symbol", "date"])
+df_filtered = df_filtered.sort_values(["date", "symbol"], ascending=[False, True]).reset_index(drop=True)
 
-# CSV export
-csv_full = df_ind.to_csv(index=False).encode("utf-8")
-st.download_button("⬇ Download processed dataset (CSV)", csv_full, "processed_prices.csv", "text/csv")
+# ----------------- OUTPUT -----------------
+st.subheader("📄 Filtered Results")
+st.write(f"Total symbols after filters: {df_filtered['symbol'].nunique()}")
+st.dataframe(df_filtered.head(100), width='stretch')
 
-st.info("Next: implement your strategies (Minervini / Qullamaggie / StockBee).")
+csv = df_filtered.to_csv(index=False)
+st.download_button("⬇ Download Filtered Data (CSV)", csv, "filtered_prices.csv")
