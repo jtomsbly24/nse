@@ -65,7 +65,7 @@ with col_refresh:
     if st.button("🔄 Refresh DB (force)"):
         ok = safe_download_db()
         if ok:
-            st.experimental_rerun()
+            st.rerun()
 
 with col_info:
     st.caption("DB is cached locally; use Refresh to force re-download from server.")
@@ -220,3 +220,4 @@ csv = f[display_cols].to_csv(index=False).encode("utf-8")
 st.download_button("💾 Download CSV (filtered)", csv, "filtered_nse.csv", "text/csv")
 
 st.info("Minimal UI + filters active. Sort order: Relative Strength (descending) when available.")
+
