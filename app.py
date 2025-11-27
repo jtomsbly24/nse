@@ -56,7 +56,8 @@ if not os.path.exists(LOCAL_DB):
 
 if st.button("🔄 Refresh Database"):
     safe_download_db()
-    st.experimental_rerun()
+    st.rerun()
+
 
 
 # ---------------- LOAD DB ----------------
@@ -115,3 +116,4 @@ if not df_filtered.empty:
 
 
 st.info("🧪 This is an initial prototype. More analytics & UI coming next.")
+
