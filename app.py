@@ -93,3 +93,31 @@ try:
 
 except Exception as e:
     st.error(f"DB Error: {e}")
+
+st.header("📊 Database Summary")
+
+@st.cache_data(ttl=3600, show_spinner=True)
+def load_full_db(conn):
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn, parse_dates=["date"])
+    # normalize ticker field if needed
+    if "ticker" not in df.columns and "symbol" in df.columns:
+        df = df.rename(columns={"symbol": "ticker"})
+    return df
+
+df = load_full_db(conn)
+
+# --- Summary metrics ---
+total_rows = len(df)
+unique_tickers = df["ticker"].nunique() if "ticker" in df.columns else "N/A"
+latest_date = df["date"].max().date() if "date" in df.columns else "N/A"
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Rows", f"{total_rows:,}")
+col2.metric("Tickers", f"{unique_tickers}")
+col3.metric("Latest Date", f"{latest_date}")
+
+st.write("---")
+st.subheader("📄 Data Preview")
+st.dataframe(df.head(50), use_container_width=True)
+
+
