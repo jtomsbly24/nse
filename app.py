@@ -13,7 +13,6 @@ TABLE_NAME = "raw_prices"
 st.set_page_config(page_title="NSE DB Tester", layout="wide")
 st.title("📦 NSE Database Loader Test")
 
-
 # ----------------- SAFE DOWNLOAD -----------------
 def safe_download_db(url=RAW_DB_URL, local_path=LOCAL_DB, max_retries=4, min_size=5000):
     tmp = local_path + ".tmp"
@@ -31,17 +30,17 @@ def safe_download_db(url=RAW_DB_URL, local_path=LOCAL_DB, max_retries=4, min_siz
 
             size = os.path.getsize(tmp)
             if size < min_size:
-                raise Exception(f"Downloaded file too small: {size} bytes")
+                raise Exception(f"File too small ({size} bytes).")
 
             os.replace(tmp, local_path)
-            st.success("✔ Database downloaded successfully.")
+            st.success("✔ DB downloaded successfully.")
             return True
-        
+
         except Exception as e:
             st.warning(f"⚠ Download failed: {e}")
             time.sleep(2)
 
-    st.error("❌ Failed to download DB after all retries.")
+    st.error("❌ Could not download DB after retries.")
     return False
 
 
@@ -49,7 +48,6 @@ def safe_download_db(url=RAW_DB_URL, local_path=LOCAL_DB, max_retries=4, min_siz
 @st.cache_resource
 def ensure_db(local_path=LOCAL_DB, url=RAW_DB_URL):
     if not os.path.exists(local_path):
-        st.warning("Local DB missing — downloading...")
         ok = safe_download_db(url, local_path)
         if not ok:
             raise RuntimeError("DB download failed.")
@@ -69,7 +67,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.caption("Database cached locally. Click refresh to re-download from server.")
+    st.caption("Database is cached locally. Click refresh to re-download from server.")
 
 
 # ---------------- VALIDATE DB ----------------
@@ -85,24 +83,23 @@ try:
     st.write("📌 Tables found in DB:", tables)
 
     if TABLE_NAME not in tables["name"].values:
-        st.error(f"❌ Expected table '{TABLE_NAME}' not found in database!")
+        st.error(f"❌ Expected table '{TABLE_NAME}' NOT found.")
         st.stop()
 
-    df_preview = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME} LIMIT 500", conn)
-    st.success(f"✔ Preview loaded from `{TABLE_NAME}`:")
-    st.dataframe(df_preview, use_container_width=True)
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME} LIMIT 500", conn)
+    st.success(f"✔ Table `{TABLE_NAME}` loaded — rows previewing below:")
+
+    st.dataframe(df, use_container_width=True)
 
 except Exception as e:
-    st.error(f"❌ DB Error: {e}")
+    st.error(f"DB Error: {e}")
 
-
-# ---------------- FULL LOAD (cached) ----------------
-st.header("📊 Full Database Summary")
+st.header("📊 Database Summary")
 
 @st.cache_data(ttl=3600, show_spinner=True)
-def load_full_db(_conn):
-    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", _conn, parse_dates=["date"])
-    # normalize possible column name mismatch
+def load_full_db(conn):
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn, parse_dates=["date"])
+    # normalize ticker field if needed
     if "ticker" not in df.columns and "symbol" in df.columns:
         df = df.rename(columns={"symbol": "ticker"})
     return df
@@ -114,13 +111,12 @@ total_rows = len(df)
 unique_tickers = df["ticker"].nunique() if "ticker" in df.columns else "N/A"
 latest_date = df["date"].max().date() if "date" in df.columns else "N/A"
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Total Rows", f"{total_rows:,}")
-c2.metric("Unique Tickers", f"{unique_tickers}")
-c3.metric("Latest Date", f"{latest_date}")
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Rows", f"{total_rows:,}")
+col2.metric("Tickers", f"{unique_tickers}")
+col3.metric("Latest Date", f"{latest_date}")
 
 st.write("---")
-st.subheader("📄 First 50 Rows")
+st.subheader("📄 Data Preview")
 st.dataframe(df.head(50), use_container_width=True)
 
-st.info("✔ DB successfully cached and validated. Ready for next phase (indicators).")
