@@ -88,7 +88,7 @@ def compute_indicators(df):
 st.sidebar.header("DB / Scanner Options")
 if st.sidebar.button("🔁 Force DB Refresh"):
     conn = load_db(force_download=True)
-    st.experimental_rerun()
+    st.rerun()
 else:
     conn = load_db()
 
@@ -130,3 +130,4 @@ st.dataframe(f[display_cols].sort_values(["symbol","date"], ascending=[True,Fals
 # CSV export
 csv = f[display_cols].to_csv(index=False).encode("utf-8")
 st.download_button("⬇ Download CSV", csv, "strategy_filtered.csv")
+
